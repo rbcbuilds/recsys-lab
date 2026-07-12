@@ -128,6 +128,76 @@ def build_subset(
     print("Note: photos/image vectors are not built here — see models/multimodal.py.")
 
 
+def downsample_processed(
+    max_users: int = 2500,
+    max_per_user: int | None = None,
+    min_user_reviews: int = 10,
+    min_item_reviews: int = 10,
+    processed_dir: Path = PROCESSED_DIR,
+    seed: int | None = None,
+) -> None:
+    """Shrink an already-built processed subset in place (fast, no raw rescan).
+
+    Keeps the ``max_users`` most active users, optionally caps each user to their
+    ``max_per_user`` most recent interactions (the biggest run-time lever, since
+    a few "power users" carry most of the interactions), re-densifies, and
+    filters items, users, and the social graph to match. Use this to trade
+    dataset size for run time without re-parsing the multi-GB raw Yelp files.
+    """
+    from ..config import settings
+
+    processed_dir = Path(processed_dir)
+    inter = pd.read_parquet(processed_dir / "interactions.parquet")
+    u, i = settings.user_col, settings.item_col
+
+    # Keep the most active users (stable, deterministic).
+    top_users = inter[u].value_counts().head(max_users).index
+    inter = inter[inter[u].isin(top_users)]
+
+    # Cap per-user history to the most recent interactions. This is what
+    # actually shrinks the interaction count when a few users review hundreds
+    # of items, and it keeps the temporal-split evaluation meaningful.
+    if max_per_user is not None and settings.time_col in inter.columns:
+        inter = (
+            inter.sort_values(settings.time_col)
+            .groupby(u, group_keys=False)
+            .tail(max_per_user)
+        )
+
+    # Re-densify so items/users still meet the interaction thresholds.
+    inter = _densify(inter, min_user_reviews, min_item_reviews)
+    keep_users = set(inter[u])
+    keep_items = set(inter[i])
+
+    items = pd.read_parquet(processed_dir / "items.parquet")
+    items = items[items[i].isin(keep_items)].reset_index(drop=True)
+    users = pd.read_parquet(processed_dir / "users.parquet")
+    users = users[users[u].isin(keep_users)].reset_index(drop=True)
+
+    social_path = processed_dir / "social.parquet"
+    if social_path.exists():
+        social = pd.read_parquet(social_path)
+        social = social[
+            social[u].isin(keep_users) & social["friend_id"].isin(keep_users)
+        ].reset_index(drop=True)
+        social.to_parquet(social_path, index=False)
+        n_social = len(social)
+    else:
+        n_social = 0
+
+    inter.to_parquet(processed_dir / "interactions.parquet", index=False)
+    items.to_parquet(processed_dir / "items.parquet", index=False)
+    users.to_parquet(processed_dir / "users.parquet", index=False)
+
+    density = len(inter) / (len(users) * len(items) or 1)
+    print(
+        f"Downsampled processed subset in {processed_dir}:\n"
+        f"  users={len(users):,} items={len(items):,} "
+        f"interactions={len(inter):,} density={density:.4%} "
+        f"social_edges={n_social:,}"
+    )
+
+
 def _densify(interactions: pd.DataFrame, min_u: int, min_i: int) -> pd.DataFrame:
     """Iteratively drop users/items below the interaction thresholds."""
     prev = -1
