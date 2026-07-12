@@ -28,6 +28,7 @@ from ..config import settings
 from ..eval.split import temporal_split
 from .base import Recommender
 from .ranker import LightGBMRanker
+from .sasrec import SASRecRecommender
 from .social import SocialRecommender
 
 
@@ -43,6 +44,8 @@ class TwoStageRecommender(Recommender):
         use_social: bool = False,
         social: Optional[pd.DataFrame] = None,
         social_kwargs: Optional[dict] = None,
+        use_sasrec: bool = False,
+        sasrec_kwargs: Optional[dict] = None,
         verbose: bool = False,
     ):
         """
@@ -63,6 +66,10 @@ class TwoStageRecommender(Recommender):
             TwoStageRecommenders differing only in this flag to measure lift.
         social:
             Friend-edge DataFrame (Dataset.social). Required when use_social.
+        use_sasrec:
+            If True, add a ``sasrec_score`` feature to the ranker. SASRec is fit
+            on train sequences and scores candidates only — not added as a
+            retriever. Helps warm users; cold users (no sequence) get 0.
         """
         self.retriever = retriever
         self.candidate_n = candidate_n
@@ -71,9 +78,12 @@ class TwoStageRecommender(Recommender):
         self.use_social = use_social
         self.social = social
         self.social_kwargs = social_kwargs or {}
+        self.use_sasrec = use_sasrec
+        self.sasrec_kwargs = sasrec_kwargs or {}
         self.verbose = verbose
         self.ranker = LightGBMRanker(verbose=verbose, **self.ranker_kwargs)
         self._social_model: Optional[SocialRecommender] = None
+        self._sasrec_model: Optional[SASRecRecommender] = None
         self._train: Optional[pd.DataFrame] = None
 
         if self.use_social and self.social is None:
@@ -98,11 +108,15 @@ class TwoStageRecommender(Recommender):
             print(f"  fitting retriever ({self.retriever.name}) on ret_train...")
         self.retriever.fit(ret_train)
 
-        # Social model (optional) fit on the same ret_train for consistent features.
+        # Social / SASRec models (optional) fit on ret_train for ranker features.
         train_social_scores = None
+        train_sasrec_scores = None
         if self.use_social:
             self._social_model = SocialRecommender(social=self.social, **self.social_kwargs)
             self._social_model.fit(ret_train)
+        if self.use_sasrec:
+            self._sasrec_model = SASRecRecommender(**self.sasrec_kwargs)
+            self._sasrec_model.fit(ret_train)
 
         label_users = list(rank_label_positives.keys())
         candidates = self.retriever.recommend(
@@ -111,13 +125,18 @@ class TwoStageRecommender(Recommender):
         retrieval_scores = self._score_candidates(label_users, candidates)
         if self.use_social:
             train_social_scores = self._social_model.score_candidates(candidates)
+        if self.use_sasrec:
+            train_sasrec_scores = self._sasrec_model.score_candidates(candidates)
         labels = {
             u: {item: 1.0 for item in items}
             for u, items in rank_label_positives.items()
         }
 
         if self.verbose:
-            print(f"  training ranker (use_social={self.use_social})...")
+            print(
+                f"  training ranker (use_social={self.use_social}, "
+                f"use_sasrec={self.use_sasrec})..."
+            )
         # Features from full train aggregates (user/item stats); labels from holdout.
         self.ranker.fit(
             train,
@@ -125,14 +144,17 @@ class TwoStageRecommender(Recommender):
             retrieval_scores=retrieval_scores,
             labels=labels,
             social_scores=train_social_scores,
+            sasrec_scores=train_sasrec_scores,
         )
 
-        # Re-fit retriever (and social model) on all train for inference-time recall.
+        # Re-fit retriever and feature models on all train for inference-time recall.
         if self.verbose:
             print(f"  re-fitting retriever ({self.retriever.name}) on full train...")
         self.retriever.fit(train)
         if self.use_social:
             self._social_model.fit(train)
+        if self.use_sasrec:
+            self._sasrec_model.fit(train)
         return self
 
     def recommend(
@@ -148,8 +170,15 @@ class TwoStageRecommender(Recommender):
         social_scores = (
             self._social_model.score_candidates(candidates) if self.use_social else None
         )
+        sasrec_scores = (
+            self._sasrec_model.score_candidates(candidates) if self.use_sasrec else None
+        )
         return self.ranker.rerank(
-            candidates, retrieval_scores, k=k, social_scores=social_scores
+            candidates,
+            retrieval_scores,
+            k=k,
+            social_scores=social_scores,
+            sasrec_scores=sasrec_scores,
         )
 
     # ------------------------------------------------------------- helpers

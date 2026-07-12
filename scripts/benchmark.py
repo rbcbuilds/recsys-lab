@@ -18,6 +18,7 @@ Build the dataset:
 Run:
 
     python scripts/benchmark.py
+    python scripts/benchmark.py --mode ab-sasrec   # unified with/without SASRec ranker feature
 """
 
 from __future__ import annotations
@@ -43,6 +44,8 @@ from src.recsys.models import (
     ALSRecommender,
     BPRRecommender,
     ContentBasedRecommender,
+    ItemTokenLMRecommender,
+    LLMTwoStageRecommender,
     MultiRetriever,
     PopularityRecommender,
     SASRecRecommender,
@@ -53,8 +56,13 @@ from src.recsys.models import (
 
 REPORT_PATH = Path(__file__).resolve().parents[1] / "docs" / "benchmarks.md"
 
+SASREC_KWARGS = dict(dim=64, epochs=15, max_len=50)
+ITEM_TOKEN_LM_KWARGS = dict(dim=64, epochs=12, max_len=50)
+# Cross-encoder scoring is O(users × candidates); keep the pool smaller than GBM ranker.
+LLM_TWO_STAGE_CANDIDATES = 80
 
-def build_unified_two_stage(ds) -> TwoStageRecommender:
+
+def build_unified_two_stage(ds, use_sasrec: bool = False) -> TwoStageRecommender:
     """Multi-retriever pipeline meant to span warm, cold-item, and cold-user."""
     retriever = MultiRetriever(
         [
@@ -65,21 +73,37 @@ def build_unified_two_stage(ds) -> TwoStageRecommender:
         ]
     )
     return TwoStageRecommender(
-        retriever, candidate_n=200, use_social=True, social=ds.social
+        retriever,
+        candidate_n=200,
+        use_social=True,
+        social=ds.social,
+        use_sasrec=use_sasrec,
+        sasrec_kwargs=SASREC_KWARGS if use_sasrec else None,
     )
 
 
-def build_models(ds):
-    """Popularity, ALS, BPR, SASRec, two-stage baseline, unified two-stage."""
+def build_models(ds, mode: str = "full"):
+    """Model set for the requested benchmark mode."""
+    if mode == "ab-sasrec":
+        return {
+            "two_stage_unified": build_unified_two_stage(ds, use_sasrec=False),
+            "two_stage_unified_sasrec": build_unified_two_stage(ds, use_sasrec=True),
+        }
     return {
         "popularity": PopularityRecommender(),
         "als": ALSRecommender(factors=64, iterations=15),
         "bpr": BPRRecommender(factors=64, iterations=80),
-        "sasrec": SASRecRecommender(dim=64, epochs=15, max_len=50),
+        "sasrec": SASRecRecommender(**SASREC_KWARGS),
+        "item_token_lm": ItemTokenLMRecommender(**ITEM_TOKEN_LM_KWARGS),
         "two_stage": TwoStageRecommender(
             TwoTowerRecommender(dim=64, epochs=10), candidate_n=200, use_social=False
         ),
-        "two_stage_unified": build_unified_two_stage(ds),
+        "two_stage_llm": LLMTwoStageRecommender(
+            retriever=TwoTowerRecommender(dim=64, epochs=10),
+            items=ds.items,
+            candidate_n=LLM_TWO_STAGE_CANDIDATES,
+        ),
+        "two_stage_unified": build_unified_two_stage(ds, use_sasrec=True),
     }
 
 
@@ -121,7 +145,7 @@ def slice_ground_truth(test_pos, cold_items, cold_users):
     return warm, ci, cu
 
 
-def run_benchmark(ds, cutoff_quantile: float, k: int):
+def run_benchmark(ds, cutoff_quantile: float, k: int, models: dict):
     train, test_pos, cold_items, cold_users = build_slices(ds, cutoff_quantile)
     warm_gt, ci_gt, cu_gt = slice_ground_truth(test_pos, cold_items, cold_users)
     users = sorted(set(warm_gt) | set(ci_gt) | set(cu_gt))
@@ -149,7 +173,7 @@ def run_benchmark(ds, cutoff_quantile: float, k: int):
 
     rows = []
     t_all = time.time()
-    for name, model in build_models(ds).items():
+    for name, model in models.items():
         t = time.time()
         model.fit(train)
         recs = model.recommend(users, k=k)
@@ -171,7 +195,7 @@ def run_benchmark(ds, cutoff_quantile: float, k: int):
         }
         rows.append(row)
         print(
-            f"{name:20s} overall={row[f'overall_r@{k}']:.4f} "
+            f"{name:28s} overall={row[f'overall_r@{k}']:.4f} "
             f"warm={row[f'warm_r@{k}']:.4f} "
             f"cold_item={row[f'cold_item_r@{k}']:.4f} "
             f"cold_user={row[f'cold_user_r@{k}']:.4f} ({dt:.1f}s)",
@@ -183,7 +207,9 @@ def run_benchmark(ds, cutoff_quantile: float, k: int):
     return df, split_desc, counts, total
 
 
-def write_report(df, ds, k: int, split_desc: str, counts: dict, total: float) -> None:
+def write_report(
+    df, ds, k: int, split_desc: str, counts: dict, total: float, mode: str
+) -> None:
     cols = [
         f"overall_r@{k}",
         f"warm_r@{k}",
@@ -199,6 +225,18 @@ def write_report(df, ds, k: int, split_desc: str, counts: dict, total: float) ->
         lines.append(f"| {name} | {cells} | {df.loc[name, 'time_s']:.1f} |")
     table = "\n".join(lines)
 
+    section_title = (
+        "SASRec ranker feature A/B (unified pipeline)"
+        if mode == "ab-sasrec"
+        else "Cross-regime Philadelphia"
+    )
+    mode_note = (
+        "\n- **Comparison:** `two_stage_unified` vs `two_stage_unified_sasrec` — "
+        "identical `MultiRetriever`, ranker gains `sasrec_score` in the second row.\n"
+        if mode == "ab-sasrec"
+        else ""
+    )
+
     content = f"""# Benchmark results
 
 Auto-generated by `scripts/benchmark.py`. One realistic dataset (dense core +
@@ -207,13 +245,14 @@ cold tail), one global-time split, every model scored on **overall**, **warm**,
 
 ```bash
 python scripts/benchmark.py
+python scripts/benchmark.py --mode ab-sasrec
 ```
 
-## Cross-regime Philadelphia
+## {section_title}
 
 One model, one training set, four views. Cold entities arise naturally under a
 single wall-clock cutoff — not simulated. See `docs/techniques.md`.
-
+{mode_note}
 - **Dataset:** {ds.summary()}
 - **Split:** {split_desc}
 - **Cold sets:** {counts['n_cold_items']:,} cold items, {counts['n_cold_users']:,} cold users
@@ -234,8 +273,10 @@ single wall-clock cutoff — not simulated. See `docs/techniques.md`.
 Collaborative models (als, bpr, sasrec, two_stage) should be strong on warm and
 near-zero on both cold slices. Popularity lifts cold-user. The unified two-stage
 (`MultiRetriever` → ranker) is the architecture meant to stay non-zero across all
-three regimes. Cold-item recall stays low on Yelp because item text is only
-name + categories — see `docs/techniques.md`.
+three regimes. **Generative / language models:** `item_token_lm` autoregressively
+generates item tokens; `two_stage_llm` re-ranks two-tower candidates with a
+cross-encoder (candidate pool={LLM_TWO_STAGE_CANDIDATES}). Cold-item recall stays
+low on Yelp because item text is only name + categories — see `docs/techniques.md`.
 """
     REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
     REPORT_PATH.write_text(content)
@@ -243,6 +284,12 @@ name + categories — see `docs/techniques.md`.
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument(
+        "--mode",
+        choices=["full", "ab-sasrec"],
+        default="full",
+        help="full = all models; ab-sasrec = unified with/without SASRec ranker feature.",
+    )
     ap.add_argument("--cutoff-quantile", type=float, default=0.9)
     ap.add_argument("--k", type=int, default=max(settings.eval_ks))
     ap.add_argument("--no-write", action="store_true", help="Print only; skip benchmarks.md.")
@@ -251,17 +298,21 @@ def main() -> None:
     ds = load_dataset()
     print("DATA:", ds.summary(), flush=True)
 
-    df, split_desc, counts, total = run_benchmark(ds, args.cutoff_quantile, args.k)
+    models = build_models(ds, mode=args.mode)
+    df, split_desc, counts, total = run_benchmark(
+        ds, args.cutoff_quantile, args.k, models
+    )
 
-    print(f"\n=== CROSS-REGIME BENCHMARK (recall@{args.k}) ===")
+    print(f"\n=== CROSS-REGIME BENCHMARK (recall@{args.k}, mode={args.mode}) ===")
     print(df.to_string())
 
     processed_dir = settings.paths["processed"]
     processed_dir.mkdir(parents=True, exist_ok=True)
-    df.to_csv(processed_dir / "benchmark_results.csv")
+    csv_name = "benchmark_results_ab_sasrec.csv" if args.mode == "ab-sasrec" else "benchmark_results.csv"
+    df.to_csv(processed_dir / csv_name)
 
     if not args.no_write:
-        write_report(df, ds, args.k, split_desc, counts, total)
+        write_report(df, ds, args.k, split_desc, counts, total, args.mode)
         print(f"\nTOTAL {total:.1f}s — written to {REPORT_PATH}")
 
 

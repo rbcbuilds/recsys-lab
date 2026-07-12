@@ -18,16 +18,16 @@ single wall-clock cutoff — not simulated. See `docs/techniques.md`.
 - **Cold sets:** 223 cold items, 360 cold users
 - **Slice users:** warm=899, cold-item=514, cold-user=346
 - **Run date:** 2026-07-13
-- **Total run time:** 1013s (single-thread BLAS, laptop CPU)
+- **Total run time:** 608s (single-thread BLAS, laptop CPU)
 
 | model | overall_r@20 | warm_r@20 | cold_item_r@20 | cold_user_r@20 | ndcg@10 | fit+rec (s) |
 |---|---|---|---|---|---|---|
-| popularity | 0.0458 | 0.0437 | 0.0000 | 0.0686 | 0.0392 | 0.8 |
-| als | 0.0171 | 0.0275 | 0.0000 | 0.0000 | 0.0176 | 2.5 |
-| bpr | 0.0168 | 0.0270 | 0.0000 | 0.0000 | 0.0165 | 8.6 |
-| sasrec | 0.0368 | 0.0598 | 0.0000 | 0.0000 | 0.0396 | 239.1 |
-| two_stage | 0.0232 | 0.0395 | 0.0000 | 0.0000 | 0.0255 | 84.3 |
-| two_stage_unified | 0.0540 | 0.0568 | 0.0000 | 0.0767 | 0.0440 | 677.8 |
+| popularity | 0.0458 | 0.0437 | 0.0000 | 0.0686 | 0.0392 | 0.6 |
+| als | 0.0171 | 0.0275 | 0.0000 | 0.0000 | 0.0176 | 2.4 |
+| bpr | 0.0168 | 0.0270 | 0.0000 | 0.0000 | 0.0165 | 7.9 |
+| sasrec | 0.0368 | 0.0598 | 0.0000 | 0.0000 | 0.0396 | 307.8 |
+| two_stage | 0.0232 | 0.0395 | 0.0000 | 0.0000 | 0.0255 | 76.0 |
+| two_stage_unified | 0.0525 | 0.0516 | 0.0000 | 0.0867 | 0.0401 | 212.5 |
 
 ## How to read this
 

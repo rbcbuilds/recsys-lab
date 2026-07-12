@@ -66,6 +66,7 @@ class LightGBMRanker(Recommender):
         self._backend: str | None = None
         self._model = None
         self._use_social = False  # set at fit time if social_scores provided
+        self._use_sasrec = False  # set at fit time if sasrec_scores provided
         self._user_stats: Dict[str, Dict[str, float]] = {}
         self._item_stats: Dict[str, Dict[str, float]] = {}
         self._global_avg = 3.0
@@ -76,6 +77,8 @@ class LightGBMRanker(Recommender):
         names = list(self.BASE_FEATURE_NAMES)
         if self._use_social:
             names.append("social_score")
+        if self._use_sasrec:
+            names.append("sasrec_score")
         return tuple(names)
 
     # ------------------------------------------------------------------ fit
@@ -86,6 +89,7 @@ class LightGBMRanker(Recommender):
         retrieval_scores: Optional[Dict[str, Dict[str, float]]] = None,
         labels: Optional[Dict[str, Dict[str, float]]] = None,
         social_scores: Optional[Dict[str, Dict[str, float]]] = None,
+        sasrec_scores: Optional[Dict[str, Dict[str, float]]] = None,
     ) -> "LightGBMRanker":
         if candidates is None or labels is None:
             raise ValueError(
@@ -96,7 +100,9 @@ class LightGBMRanker(Recommender):
         self._build_stats(train)
         retrieval_scores = retrieval_scores or {}
         self._use_social = social_scores is not None
+        self._use_sasrec = sasrec_scores is not None
         social_scores = social_scores or {}
+        sasrec_scores = sasrec_scores or {}
 
         X_rows: List[List[float]] = []
         y_rows: List[float] = []
@@ -108,6 +114,7 @@ class LightGBMRanker(Recommender):
             rel = labels.get(user_id, {})
             scores = retrieval_scores.get(user_id, {})
             soc = social_scores.get(user_id, {})
+            sas = sasrec_scores.get(user_id, {})
             if not any(rel.get(it, 0) > 0 for it in items):
                 continue
             for rank, item_id in enumerate(items):
@@ -115,6 +122,7 @@ class LightGBMRanker(Recommender):
                     self._feature_row(
                         user_id, item_id, scores.get(item_id, 0.0), rank,
                         social_score=soc.get(item_id, 0.0),
+                        sasrec_score=sas.get(item_id, 0.0),
                     )
                 )
                 y_rows.append(float(rel.get(item_id, 0.0)))
@@ -162,12 +170,14 @@ class LightGBMRanker(Recommender):
         retrieval_scores: Optional[Dict[str, Dict[str, float]]] = None,
         k: int = 10,
         social_scores: Optional[Dict[str, Dict[str, float]]] = None,
+        sasrec_scores: Optional[Dict[str, Dict[str, float]]] = None,
     ) -> Dict[str, List[str]]:
         if self._model is None:
             raise RuntimeError("Call fit() before rerank().")
 
         retrieval_scores = retrieval_scores or {}
         social_scores = social_scores or {}
+        sasrec_scores = sasrec_scores or {}
         out: Dict[str, List[str]] = {}
         for user_id, items in candidates.items():
             if not items:
@@ -175,11 +185,13 @@ class LightGBMRanker(Recommender):
                 continue
             scores = retrieval_scores.get(user_id, {})
             soc = social_scores.get(user_id, {})
+            sas = sasrec_scores.get(user_id, {})
             X = np.asarray(
                 [
                     self._feature_row(
                         user_id, item_id, scores.get(item_id, 0.0), rank,
                         social_score=soc.get(item_id, 0.0),
+                        sasrec_score=sas.get(item_id, 0.0),
                     )
                     for rank, item_id in enumerate(items)
                 ],
@@ -270,6 +282,7 @@ class LightGBMRanker(Recommender):
         retrieval_score: float,
         rank: int,
         social_score: float = 0.0,
+        sasrec_score: float = 0.0,
     ) -> List[float]:
         us = self._user_stats.get(user_id, {"n": 0.0, "avg": self._global_avg})
         its = self._item_stats.get(item_id, {"n": 0.0, "avg": self._global_avg})
@@ -284,4 +297,6 @@ class LightGBMRanker(Recommender):
         ]
         if self._use_social:
             row.append(float(social_score))
+        if self._use_sasrec:
+            row.append(float(sasrec_score))
         return row

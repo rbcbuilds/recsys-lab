@@ -118,6 +118,8 @@ def main() -> None:
                 candidate_n=100,
                 use_social=True,
                 social=ds.social,
+                use_sasrec=True,
+                sasrec_kwargs=dict(dim=64, epochs=15, max_len=50),
                 verbose=False,
             )
         )

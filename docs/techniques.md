@@ -37,6 +37,8 @@ Every model below is either a retriever, a ranker, or a baseline that does both 
 | Content-based | `text_embeddings.py` | Content / cold-start | Encode item text; user = mean of liked-item vectors; cosine score. |
 | Content two-tower | `text_embeddings.py` | Retrieval | Two-tower with text concatenated into the item tower (production cold-start pattern). |
 | MultiRetriever | `multi_retriever.py` | Retrieval | Union several retrievers and fuse via reciprocal-rank fusion; usable as a two-stage retriever. |
+| Item-token LM | `item_token_lm.py` | Generative retrieval | Causal LM over item ids; autoregressively *generates* the next items token-by-token. |
+| LLM reranker | `llm_reranker.py` | Ranking (language) | Cross-encoder (or prompt embedding) scores (history, candidate) pairs; used in `LLMTwoStageRecommender`. |
 
 ---
 
@@ -169,7 +171,24 @@ Static user embeddings (ALS, two-tower id table) average a user's whole history 
 - taste drifts over time
 - order of interactions matters more than the bag of items
 
-SASRec replaces the user embedding with a **causal transformer over the recent item sequence**. Training target = next item at each position. Inference = last hidden state · item embedding matrix. Implemented in `sasrec.py`.
+SASRec replaces the user embedding with a **causal transformer over the recent item sequence**. Training target = next item at each position. Inference = last hidden state · item embedding matrix. Implemented in `sasrec.py`. In the unified two-stage, SASRec is also used as a **ranker feature** (`use_sasrec=True`): it scores candidates from the fused pool without adding a fifth retriever.
+
+### Generative vs discriminative recommendation
+
+| | **Discriminative** (most of this repo) | **Generative** |
+|---|---|---|
+| **Question** | How relevant is item *i* for user *u*? | What item(s) should we show user *u*? |
+| **Output** | A score per (user, item) pair | The recommendation(s) directly |
+| **Serving** | Score candidates → sort → top-K | Model *emits* items (tokens or text) |
+| **Examples here** | ALS, BPR, two-tower, SASRec, LightGBM ranker | `ItemTokenLMRecommender` |
+
+**Discriminative path (production default):** retrieve ~200 candidates → score each → re-rank. Even SASRec is discriminative at inference: it dot-products the sequence embedding against *all* item embeddings, then takes top-K.
+
+**Generative path — item-token LM** (`item_token_lm.py`): each item id is a vocabulary token. A causal transformer is trained with next-token cross-entropy on user histories. At inference the model **autoregressively decodes** item tokens one at a time (append each pick to context, predict the next) — it generates the list instead of scanning the catalog. Cold/empty users fall back to popularity.
+
+**Generative-adjacent — LLM reranker** (`llm_reranker.py`): still discriminative in the pipeline (candidates in, sorted list out), but the *scoring function* is language-native. `LLMReranker` builds a short text history ("User recently enjoyed: …") and scores each candidate's item text with a cross-encoder (`cross-encoder/ms-marco-MiniLM-L6-v2`, or bi-encoder / token-overlap fallback). `LLMTwoStageRecommender` = retriever → `LLMReranker`. Useful when you want LLM-style relevance judgment without training a GBM ranker — and without generating the full catalog from scratch.
+
+**When to use which:** discriminative retrieve+rank is still the reliable production pattern. Item-token LMs are the research direction toward unified generative rec (TIGER, LC-Rec, etc.). LLM rerankers are a pragmatic middle ground: language understanding on a *small* candidate pool.
 
 ### Text embeddings + cold start
 Collaborative models cannot score an item with zero interactions. Content can:
@@ -198,7 +217,11 @@ Because the injected tail is first-seen after `T`, it has **zero** training hist
 | als / bpr | 0.017 | 0.027 | 0.000 | 0.000 |
 | sasrec | 0.037 | **0.060** | 0.000 | 0.000 |
 | two_stage | 0.023 | 0.039 | 0.000 | 0.000 |
-| **two_stage_unified** | **0.054** | 0.057 | 0.000 | **0.077** |
+| item_token_lm | — | — | — | — |
+| two_stage_llm | — | — | — | — |
+| **two_stage_unified** | **0.052** | 0.052 | 0.000 | **0.087** |
+
+*`item_token_lm` and `two_stage_llm` are in `benchmark.py` full mode; re-run to fill rows.*
 
 The unified two-stage (`MultiRetriever[two-tower + content_based + social + popularity] → ranker`, see `scripts/benchmark.py::build_unified_two_stage`) wins on **overall and cold-user**; SASRec is strongest on warm among single-signal models.
 

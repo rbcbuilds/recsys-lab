@@ -184,6 +184,49 @@ class SASRecRecommender(IndexedRecommender):
             out[user_id] = self._top_k_from_scores(user_id, s, k, exclude_seen)
         return out
 
+    def score_candidates(
+        self, candidates: Dict[str, List[str]]
+    ) -> Dict[str, Dict[str, float]]:
+        """Per-(user, item) SASRec scores for a candidate set.
+
+        Uses the last-position hidden state dotted with item embeddings — the
+        same scoring function as ``recommend``, but restricted to the supplied
+        candidates. Users without a train sequence (cold users) get no scores.
+        """
+        import torch
+
+        if self._model is None:
+            raise RuntimeError("Call fit() before score_candidates().")
+
+        device = next(self._model.parameters()).device
+        out: Dict[str, Dict[str, float]] = {u: {} for u in candidates}
+        known = [u for u in candidates if u in self._sequences]
+        if not known:
+            return out
+
+        seqs = []
+        for uid in known:
+            idxs = self._sequences[uid][-self.max_len :]
+            pad = self.max_len - len(idxs)
+            seqs.append([_PAD] * pad + idxs)
+        xb = torch.as_tensor(np.asarray(seqs, dtype=np.int64), device=device)
+
+        with torch.no_grad():
+            hidden = self._model.encode(xb)
+            last = hidden[:, -1, :]
+            item_weight = self._model.item_emb.weight
+
+        for row, user_id in enumerate(known):
+            uvec = last[row]
+            scores: Dict[str, float] = {}
+            for item_id in candidates.get(user_id, []):
+                j = self.item_to_idx.get(item_id)
+                if j is None:
+                    continue
+                scores[item_id] = float(uvec @ item_weight[j + 1])
+            out[user_id] = scores
+        return out
+
     def _resolve_device(self, torch):
         if self.device:
             return torch.device(self.device)

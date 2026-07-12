@@ -13,6 +13,8 @@ Working now:
     ContentBasedRecommender       - pure content CF from item text (cold-start)
     ContentTwoTowerRecommender    - two-tower with text in the item tower (cold-start-aware)
     MultiRetriever                - union + reciprocal-rank-fuse several retrievers
+    ItemTokenLMRecommender        - generative causal LM over item-token sequences
+    LLMReranker / LLMTwoStage     - language-model scoring re-ranks retrieved candidates
 
 Scaffolds (documented interfaces + guidance, raise NotImplementedError):
     graph.LightGCNRecommender
@@ -23,6 +25,8 @@ from .base import Recommender
 from .bpr import BPRRecommender
 from .item_cf import ItemCFRecommender
 from .matrix_factorization import ALSRecommender
+from .item_token_lm import ItemTokenLMRecommender
+from .llm_reranker import LLMReranker, LLMTwoStageRecommender
 from .multi_retriever import MultiRetriever
 from .popularity import PopularityRecommender
 from .ranker import LightGBMRanker
@@ -46,4 +50,7 @@ __all__ = [
     "ContentBasedRecommender",
     "ContentTwoTowerRecommender",
     "MultiRetriever",
+    "ItemTokenLMRecommender",
+    "LLMReranker",
+    "LLMTwoStageRecommender",
 ]
