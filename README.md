@@ -71,8 +71,9 @@ Built top-to-bottom. Each phase has a module and a notebook.
 The question driving every addition: **can it beat a well-tuned baseline?**
 
 > **Reference:** see [`docs/techniques.md`](docs/techniques.md) for a concise
-> summary of every technique, key concepts (ALS, GBM, in-batch negatives,
-> evaluation), and benchmark results.
+> summary of every technique and key concepts (ALS, GBM, in-batch negatives,
+> evaluation), and [`docs/benchmarks.md`](docs/benchmarks.md) for the latest
+> head-to-head results (reproduce with `python scripts/benchmark.py`).
 
 ## Project structure
 
