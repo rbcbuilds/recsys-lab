@@ -28,6 +28,7 @@ from ..config import settings
 from ..eval.split import temporal_split
 from .base import Recommender
 from .ranker import LightGBMRanker
+from .social import SocialRecommender
 
 
 class TwoStageRecommender(Recommender):
@@ -39,6 +40,9 @@ class TwoStageRecommender(Recommender):
         candidate_n: int = 100,
         rank_label_fraction: float = 0.2,
         ranker_kwargs: Optional[dict] = None,
+        use_social: bool = False,
+        social: Optional[pd.DataFrame] = None,
+        social_kwargs: Optional[dict] = None,
         verbose: bool = False,
     ):
         """
@@ -53,14 +57,27 @@ class TwoStageRecommender(Recommender):
         rank_label_fraction:
             Fraction of each user's most recent *training* interactions held out
             as ranker labels (inner temporal split).
+        use_social:
+            If True, add a ``social_score`` feature to the ranker (requires
+            ``social=``). This is the with/without-social toggle: build two
+            TwoStageRecommenders differing only in this flag to measure lift.
+        social:
+            Friend-edge DataFrame (Dataset.social). Required when use_social.
         """
         self.retriever = retriever
         self.candidate_n = candidate_n
         self.rank_label_fraction = rank_label_fraction
         self.ranker_kwargs = ranker_kwargs or {}
+        self.use_social = use_social
+        self.social = social
+        self.social_kwargs = social_kwargs or {}
         self.verbose = verbose
         self.ranker = LightGBMRanker(verbose=verbose, **self.ranker_kwargs)
+        self._social_model: Optional[SocialRecommender] = None
         self._train: Optional[pd.DataFrame] = None
+
+        if self.use_social and self.social is None:
+            raise ValueError("use_social=True requires social=Dataset.social.")
 
     def fit(self, train: pd.DataFrame) -> "TwoStageRecommender":
         self._train = train
@@ -81,30 +98,41 @@ class TwoStageRecommender(Recommender):
             print(f"  fitting retriever ({self.retriever.name}) on ret_train...")
         self.retriever.fit(ret_train)
 
+        # Social model (optional) fit on the same ret_train for consistent features.
+        train_social_scores = None
+        if self.use_social:
+            self._social_model = SocialRecommender(social=self.social, **self.social_kwargs)
+            self._social_model.fit(ret_train)
+
         label_users = list(rank_label_positives.keys())
         candidates = self.retriever.recommend(
             label_users, k=self.candidate_n, exclude_seen=True
         )
         retrieval_scores = self._score_candidates(label_users, candidates)
+        if self.use_social:
+            train_social_scores = self._social_model.score_candidates(candidates)
         labels = {
             u: {item: 1.0 for item in items}
             for u, items in rank_label_positives.items()
         }
 
         if self.verbose:
-            print("  training LightGBM ranker...")
+            print(f"  training ranker (use_social={self.use_social})...")
         # Features from full train aggregates (user/item stats); labels from holdout.
         self.ranker.fit(
             train,
             candidates=candidates,
             retrieval_scores=retrieval_scores,
             labels=labels,
+            social_scores=train_social_scores,
         )
 
-        # Re-fit retriever on all train for inference-time recall.
+        # Re-fit retriever (and social model) on all train for inference-time recall.
         if self.verbose:
             print(f"  re-fitting retriever ({self.retriever.name}) on full train...")
         self.retriever.fit(train)
+        if self.use_social:
+            self._social_model.fit(train)
         return self
 
     def recommend(
@@ -117,7 +145,12 @@ class TwoStageRecommender(Recommender):
         n = max(self.candidate_n, k)
         candidates = self.retriever.recommend(users, k=n, exclude_seen=exclude_seen)
         retrieval_scores = self._score_candidates(users, candidates)
-        return self.ranker.rerank(candidates, retrieval_scores, k=k)
+        social_scores = (
+            self._social_model.score_candidates(candidates) if self.use_social else None
+        )
+        return self.ranker.rerank(
+            candidates, retrieval_scores, k=k, social_scores=social_scores
+        )
 
     # ------------------------------------------------------------- helpers
     def _score_candidates(

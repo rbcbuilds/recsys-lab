@@ -123,32 +123,64 @@ class SocialRecommender(IndexedRecommender):
         union = len(ui | fi)
         return inter / union if union else 0.0
 
+    def _score_vector(self, user_id: str, blend_popularity: bool = True) -> np.ndarray:
+        """Full (n_items,) social score vector for one user.
+
+        When ``blend_popularity`` is False, returns the pure normalized social
+        term (useful as a standalone *feature* for a downstream ranker, where a
+        separate popularity feature already exists).
+        """
+        scores = np.zeros(len(self.item_ids), dtype=float)
+
+        # Social term: trust-weighted sum of friends' interactions.
+        social_mass = 0.0
+        for f in self._friends.get(user_id, []):
+            t = self._trust(user_id, f)
+            if t <= 0:
+                continue
+            for item_id, w in self._user_item_weight.get(f, {}).items():
+                idx = self.item_to_idx.get(item_id)
+                if idx is not None:
+                    scores[idx] += t * w
+                    social_mass += t * w
+
+        # Normalize social term so the alpha blend is comparable across users.
+        if social_mass > 0:
+            scores = scores / social_mass
+
+        if not blend_popularity:
+            return scores
+        # Popularity back-off (helps cold / friendless users).
+        return (1.0 - self.alpha) * scores + self.alpha * self._item_pop
+
     def recommend(
         self, users: List[str], k: int = 10, exclude_seen: bool = True
     ) -> Dict[str, List[str]]:
         out: Dict[str, List[str]] = {}
         for user_id in users:
-            scores = np.zeros(len(self.item_ids), dtype=float)
-
-            # Social term: trust-weighted sum of friends' interactions.
-            friends = self._friends.get(user_id, [])
-            social_mass = 0.0
-            for f in friends:
-                t = self._trust(user_id, f)
-                if t <= 0:
-                    continue
-                for item_id, w in self._user_item_weight.get(f, {}).items():
-                    idx = self.item_to_idx.get(item_id)
-                    if idx is not None:
-                        scores[idx] += t * w
-                        social_mass += t * w
-
-            # Normalize social term so alpha blend is meaningful across users.
-            if social_mass > 0:
-                scores = scores / social_mass
-
-            # Popularity back-off (helps cold / friendless users).
-            scores = (1.0 - self.alpha) * scores + self.alpha * self._item_pop
-
+            scores = self._score_vector(user_id, blend_popularity=True)
             out[user_id] = self._top_k_from_scores(user_id, scores, k, exclude_seen)
+        return out
+
+    def score_candidates(
+        self, candidates: Dict[str, List[str]], blend_popularity: bool = False
+    ) -> Dict[str, Dict[str, float]]:
+        """Per-(user, item) social scores for a candidate set.
+
+        Used to inject a ``social_score`` feature into a downstream ranker.
+        Defaults to the *pure* social term (no popularity blend) since the ranker
+        already has its own popularity features.
+        """
+        out: Dict[str, Dict[str, float]] = {}
+        for user_id, items in candidates.items():
+            if user_id not in self.user_to_idx and user_id not in self._friends:
+                out[user_id] = {}
+                continue
+            vec = self._score_vector(user_id, blend_popularity=blend_popularity)
+            scores: Dict[str, float] = {}
+            for item_id in items:
+                idx = self.item_to_idx.get(item_id)
+                if idx is not None:
+                    scores[item_id] = float(vec[idx])
+            out[user_id] = scores
         return out

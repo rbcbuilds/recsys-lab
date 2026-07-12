@@ -36,7 +36,7 @@ class LightGBMRanker(Recommender):
 
     name = "lgbm_ranker"
 
-    FEATURE_NAMES = (
+    BASE_FEATURE_NAMES = (
         "retrieval_score",
         "retrieval_rank",
         "user_n",
@@ -65,9 +65,18 @@ class LightGBMRanker(Recommender):
         self.prefer_lightgbm = prefer_lightgbm
         self._backend: str | None = None
         self._model = None
+        self._use_social = False  # set at fit time if social_scores provided
         self._user_stats: Dict[str, Dict[str, float]] = {}
         self._item_stats: Dict[str, Dict[str, float]] = {}
         self._global_avg = 3.0
+
+    @property
+    def feature_names(self) -> tuple:
+        """Active feature set (adds social_score when social features are used)."""
+        names = list(self.BASE_FEATURE_NAMES)
+        if self._use_social:
+            names.append("social_score")
+        return tuple(names)
 
     # ------------------------------------------------------------------ fit
     def fit(
@@ -76,6 +85,7 @@ class LightGBMRanker(Recommender):
         candidates: Optional[Dict[str, List[str]]] = None,
         retrieval_scores: Optional[Dict[str, Dict[str, float]]] = None,
         labels: Optional[Dict[str, Dict[str, float]]] = None,
+        social_scores: Optional[Dict[str, Dict[str, float]]] = None,
     ) -> "LightGBMRanker":
         if candidates is None or labels is None:
             raise ValueError(
@@ -85,6 +95,8 @@ class LightGBMRanker(Recommender):
 
         self._build_stats(train)
         retrieval_scores = retrieval_scores or {}
+        self._use_social = social_scores is not None
+        social_scores = social_scores or {}
 
         X_rows: List[List[float]] = []
         y_rows: List[float] = []
@@ -95,11 +107,15 @@ class LightGBMRanker(Recommender):
                 continue
             rel = labels.get(user_id, {})
             scores = retrieval_scores.get(user_id, {})
+            soc = social_scores.get(user_id, {})
             if not any(rel.get(it, 0) > 0 for it in items):
                 continue
             for rank, item_id in enumerate(items):
                 X_rows.append(
-                    self._feature_row(user_id, item_id, scores.get(item_id, 0.0), rank)
+                    self._feature_row(
+                        user_id, item_id, scores.get(item_id, 0.0), rank,
+                        social_score=soc.get(item_id, 0.0),
+                    )
                 )
                 y_rows.append(float(rel.get(item_id, 0.0)))
             groups.append(len(items))
@@ -118,6 +134,19 @@ class LightGBMRanker(Recommender):
         self._fit_sklearn(X, y)
         return self
 
+    def feature_importance(self) -> Dict[str, float]:
+        """Feature importances keyed by name (backend-appropriate)."""
+        if self._model is None:
+            raise RuntimeError("Call fit() first.")
+        names = self.feature_names
+        if self._backend == "lightgbm":
+            imp = self._model.feature_importance(importance_type="gain")
+        else:  # sklearn permutation-free proxy not available; use split-based
+            imp = getattr(self._model, "feature_importances_", None)
+            if imp is None:
+                return {n: float("nan") for n in names}
+        return {n: float(v) for n, v in zip(names, imp)}
+
     def recommend(
         self, users: List[str], k: int = 10, exclude_seen: bool = True
     ) -> Dict[str, List[str]]:
@@ -132,20 +161,26 @@ class LightGBMRanker(Recommender):
         candidates: Dict[str, List[str]],
         retrieval_scores: Optional[Dict[str, Dict[str, float]]] = None,
         k: int = 10,
+        social_scores: Optional[Dict[str, Dict[str, float]]] = None,
     ) -> Dict[str, List[str]]:
         if self._model is None:
             raise RuntimeError("Call fit() before rerank().")
 
         retrieval_scores = retrieval_scores or {}
+        social_scores = social_scores or {}
         out: Dict[str, List[str]] = {}
         for user_id, items in candidates.items():
             if not items:
                 out[user_id] = []
                 continue
             scores = retrieval_scores.get(user_id, {})
+            soc = social_scores.get(user_id, {})
             X = np.asarray(
                 [
-                    self._feature_row(user_id, item_id, scores.get(item_id, 0.0), rank)
+                    self._feature_row(
+                        user_id, item_id, scores.get(item_id, 0.0), rank,
+                        social_score=soc.get(item_id, 0.0),
+                    )
                     for rank, item_id in enumerate(items)
                 ],
                 dtype=np.float32,
@@ -166,7 +201,7 @@ class LightGBMRanker(Recommender):
             # Force-load the native lib here so we catch macOS libomp errors.
             _ = lgb.__version__
             dataset = lgb.Dataset(
-                X, label=y, group=groups, feature_name=list(self.FEATURE_NAMES)
+                X, label=y, group=groups, feature_name=list(self.feature_names)
             )
             params = {
                 "objective": "lambdarank",
@@ -229,11 +264,16 @@ class LightGBMRanker(Recommender):
         }
 
     def _feature_row(
-        self, user_id: str, item_id: str, retrieval_score: float, rank: int
+        self,
+        user_id: str,
+        item_id: str,
+        retrieval_score: float,
+        rank: int,
+        social_score: float = 0.0,
     ) -> List[float]:
         us = self._user_stats.get(user_id, {"n": 0.0, "avg": self._global_avg})
         its = self._item_stats.get(item_id, {"n": 0.0, "avg": self._global_avg})
-        return [
+        row = [
             float(retrieval_score),
             float(rank),
             us["n"],
@@ -242,3 +282,6 @@ class LightGBMRanker(Recommender):
             its["avg"],
             us["avg"] - its["avg"],
         ]
+        if self._use_social:
+            row.append(float(social_score))
+        return row

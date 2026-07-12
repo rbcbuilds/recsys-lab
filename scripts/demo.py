@@ -65,6 +65,17 @@ def main() -> None:
             TwoStageRecommender(
                 retriever=TwoTowerRecommender(dim=64, epochs=15),
                 candidate_n=100,
+                use_social=False,
+                verbose=False,
+            )
+        )
+        # Same pipeline + a social_score feature, to measure social lift.
+        models.append(
+            TwoStageRecommender(
+                retriever=TwoTowerRecommender(dim=64, epochs=15),
+                candidate_n=100,
+                use_social=True,
+                social=ds.social,
                 verbose=False,
             )
         )
@@ -76,7 +87,13 @@ def main() -> None:
 
     rows = []
     for model in models:
-        label = model.name + ("_recency" if getattr(model, "recency_weighted", False) else "")
+        label = model.name
+        if getattr(model, "recency_weighted", False):
+            label += "_recency"
+        if getattr(model, "use_social", False):
+            label += "_social"
+        elif model.name == "two_stage":
+            label += "_no_social"
         print(f"fitting {label}...")
         model.fit(train)
         recs = model.recommend(test_users, k=max_k)
