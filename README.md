@@ -75,8 +75,9 @@ The question driving every addition: **can it beat a well-tuned baseline?**
 
 > **Reference:** see [`docs/techniques.md`](docs/techniques.md) for a concise
 > summary of every technique and key concepts (ALS, GBM, in-batch negatives,
-> evaluation), and [`docs/benchmarks.md`](docs/benchmarks.md) for the latest
-> head-to-head results (reproduce with `python scripts/benchmark.py`).
+> evaluation), and [`docs/benchmarks.md`](docs/benchmarks.md) for cross-regime
+> results — overall, warm, cold-item, and cold-user on one dataset (reproduce
+> with `python scripts/benchmark.py`).
 
 ## Project structure
 

@@ -110,7 +110,7 @@ def main() -> None:
                 retriever=MultiRetriever(
                     [
                         TwoTowerRecommender(dim=64, epochs=15),
-                        ContentTwoTowerRecommender(items=ds.items, dim=64, epochs=10),
+                        ContentBasedRecommender(items=ds.items),
                         SocialRecommender(social=ds.social),
                         PopularityRecommender(),
                     ]

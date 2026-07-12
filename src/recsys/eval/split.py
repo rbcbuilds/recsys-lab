@@ -68,7 +68,7 @@ def cold_user_holdout(
     earliest training interactions. With ``keep=0`` (default) the user is fully
     new — absent from train — so collaborative models cannot represent them and
     only social / popularity fallbacks can help. Use with
-    :func:`evaluate_cold_items` style slicing (see ``scripts/cold_start.py``).
+    :func:`evaluate_cold_items` style slicing (see ``scripts/benchmark.py``).
 
     Returns ``(train_with_cold_user_history_stripped, cold_user_ids)``.
     """
@@ -153,4 +153,65 @@ def temporal_split(
             test_positives[user_id] = positives
 
     train_df = pd.concat(train_parts).reset_index(drop=True)
+    return train_df, test_positives
+
+
+def global_temporal_split(
+    interactions: pd.DataFrame,
+    cutoff_quantile: float = 0.9,
+    cutoff: "pd.Timestamp | None" = None,
+    positive_threshold: float | None = None,
+) -> tuple[pd.DataFrame, dict[str, set]]:
+    """Split by a single global time cutoff: train on the past, test on the future.
+
+    Unlike :func:`temporal_split` (which holds out each user's most-recent
+    fraction and therefore always leaves every user with training history), this
+    uses one wall-clock cutoff shared by everyone. That is what makes cold users
+    (and cold items) arise *naturally*: any user or item whose interactions all
+    fall after the cutoff never appears in training.
+
+        train = interactions with timestamp <= T
+        test  = interactions with timestamp >  T   (positives: rating >= threshold)
+
+    Cold sets are simply derived by the caller as ``test_entities - train_entities``.
+
+    Parameters
+    ----------
+    cutoff_quantile:
+        If ``cutoff`` is not given, T is this quantile of the interaction
+        timestamps (0.9 => newest 10% of time is the test window).
+    cutoff:
+        Explicit cutoff timestamp (overrides ``cutoff_quantile``).
+    positive_threshold:
+        Minimum rating to count as a relevant test item.
+
+    Returns
+    -------
+    train_df, test_positives (``{user_id: {item_id, ...}}``).
+    """
+    positive_threshold = (
+        settings.positive_threshold if positive_threshold is None else positive_threshold
+    )
+    u, i, t, r = (
+        settings.user_col,
+        settings.item_col,
+        settings.time_col,
+        settings.rating_col,
+    )
+
+    ts = pd.to_datetime(interactions[t])
+    if cutoff is None:
+        cutoff = ts.quantile(cutoff_quantile)
+
+    is_train = ts <= cutoff
+    train_df = interactions[is_train].reset_index(drop=True)
+    test_df = interactions[~is_train]
+
+    test_positives: dict[str, set] = {}
+    pos = test_df[test_df[r] >= positive_threshold]
+    for user_id, grp in pos.groupby(u, sort=False):
+        items = set(grp[i])
+        if items:
+            test_positives[user_id] = items
+
     return train_df, test_positives

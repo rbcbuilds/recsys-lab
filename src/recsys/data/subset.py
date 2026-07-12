@@ -128,6 +128,205 @@ def build_subset(
     print("Note: photos/image vectors are not built here — see models/multimodal.py.")
 
 
+def build_crossregime_subset(
+    city: str = "Philadelphia",
+    min_user_reviews: int = 10,
+    min_item_reviews: int = 10,
+    max_core_users: int = 2000,
+    cutoff_quantile: float = 0.9,
+    max_cold_items: int = 500,
+    max_cold_users: int = 500,
+    tail_review_min: int = 1,
+    tail_review_max: int = 8,
+    raw_dir: Path = RAW_DIR,
+    out_dir: Path | None = None,
+    seed: int | None = None,
+) -> None:
+    """Build the *cross-regime* slice: a dense warm core + a real cold tail.
+
+    The point of this dataset is that cold users and cold items arise
+    **naturally** under a single global-time split, instead of being carved out
+    by simulation. Construction (one streaming pass over the raw city reviews):
+
+    1. Densify the city reviews to a warm core (``min_user``/``min_item``
+       thresholds) and cap to the ``max_core_users`` most active users.
+    2. Pick a cutoff ``T`` = ``cutoff_quantile`` of the core's timestamps.
+    3. Inject a low-activity tail sampled from the *raw* city reviews:
+         * cold items: first reviewed after ``T``, total city reviews in
+           ``[tail_review_min, tail_review_max]``, reviewed by >= 1 core user
+           (so warm users have them as future targets);
+         * cold users: first active after ``T``, total reviews in the same
+           window, reviewing >= 1 core item (so their targets are scorable by
+           popularity/social).
+    4. Merge core + tail interactions/items/users/social, same schema as
+       :func:`build_subset`.
+
+    Evaluate with :func:`recsys.eval.global_temporal_split` at the same ``T``:
+    everything first-seen after ``T`` has zero training history, hence cold.
+    """
+    from ..config import settings as _settings
+
+    seed = _settings.seed if seed is None else seed
+    rng = np.random.default_rng(seed)
+    out_dir = (RAW_DIR.parent / "processed_philly_xreg") if out_dir is None else Path(out_dir)
+
+    raw_dir = Path(raw_dir)
+    business_path = raw_dir / BUSINESS_FILE
+    review_path = raw_dir / REVIEW_FILE
+    user_path = raw_dir / USER_FILE
+    for p in (business_path, review_path, user_path):
+        if not p.exists():
+            raise FileNotFoundError(
+                f"Missing {p}. Download the Yelp Open Dataset into {raw_dir}."
+            )
+
+    u, i, t, r = (
+        _settings.user_col,
+        _settings.item_col,
+        _settings.time_col,
+        _settings.rating_col,
+    )
+
+    # 1. City businesses -> item universe (+ text).
+    biz_rows = []
+    for b in _iter_json(business_path):
+        if (b.get("city") or "").strip().lower() != city.strip().lower():
+            continue
+        biz_rows.append(
+            {
+                i: b["business_id"],
+                "name": b.get("name", ""),
+                "categories": b.get("categories") or "",
+                "city": b.get("city", ""),
+                "text": b.get("name", "") + ". " + (b.get("categories") or ""),
+            }
+        )
+    items_all = pd.DataFrame(biz_rows)
+    if items_all.empty:
+        raise ValueError(f"No businesses found for city={city!r}.")
+    city_items = set(items_all[i])
+
+    # 2. All city reviews (unfiltered) -> we need the full tail, not just a core.
+    rev_rows = []
+    for rev in _iter_json(review_path):
+        if rev["business_id"] not in city_items:
+            continue
+        rev_rows.append(
+            {
+                u: rev["user_id"],
+                i: rev["business_id"],
+                r: float(rev.get("stars", 0)),
+                t: rev.get("date"),
+            }
+        )
+    city_inter = pd.DataFrame(rev_rows)
+    city_inter[t] = pd.to_datetime(city_inter[t])
+
+    # 3. Dense warm core + cap to most active users.
+    core = _densify(city_inter, min_user_reviews, min_item_reviews)
+    top_users = core[u].value_counts().head(max_core_users).index
+    core = core[core[u].isin(top_users)]
+    core = _densify(core, min_user_reviews, min_item_reviews)
+    core_users = set(core[u])
+    core_items = set(core[i])
+
+    # 4. Global cutoff from the core's time distribution.
+    cutoff = core[t].quantile(cutoff_quantile)
+
+    # 5. Per-item / per-user tail stats over ALL city reviews.
+    item_first = city_inter.groupby(i)[t].min()
+    item_count = city_inter.groupby(i).size()
+    user_first = city_inter.groupby(u)[t].min()
+    user_count = city_inter.groupby(u).size()
+
+    in_window = lambda c: (c >= tail_review_min) & (c <= tail_review_max)
+
+    # Cold items: born after T, low activity, reviewed by >= 1 core user.
+    cand_items = item_first[(item_first > cutoff) & in_window(item_count)].index
+    cand_items = [x for x in cand_items if x not in core_items]
+    reviewed_by_core = set(
+        city_inter[city_inter[u].isin(core_users)][i].unique()
+    )
+    cand_items = [x for x in cand_items if x in reviewed_by_core]
+    if len(cand_items) > max_cold_items:
+        cand_items = rng.choice(
+            np.array(cand_items), size=max_cold_items, replace=False
+        ).tolist()
+    cold_items = set(cand_items)
+
+    # Cold users: born after T, low activity, reviewing >= 1 core item.
+    cand_users = user_first[(user_first > cutoff) & in_window(user_count)].index
+    cand_users = [x for x in cand_users if x not in core_users]
+    reviews_core_item = set(
+        city_inter[city_inter[i].isin(core_items)][u].unique()
+    )
+    cand_users = [x for x in cand_users if x in reviews_core_item]
+    if len(cand_users) > max_cold_users:
+        cand_users = rng.choice(
+            np.array(cand_users), size=max_cold_users, replace=False
+        ).tolist()
+    cold_users = set(cand_users)
+
+    # 6. Merge interactions:
+    #    core  +  (cold-item reviews by core users)  +  (cold-user reviews of core items)
+    cold_item_rows = city_inter[
+        city_inter[i].isin(cold_items) & city_inter[u].isin(core_users)
+    ]
+    cold_user_rows = city_inter[
+        city_inter[u].isin(cold_users) & city_inter[i].isin(core_items)
+    ]
+    merged = pd.concat([core, cold_item_rows, cold_user_rows]).drop_duplicates(
+        subset=[u, i, t]
+    )
+    merged = merged.sort_values([u, t]).reset_index(drop=True)
+
+    keep_users = set(merged[u])
+    keep_items = set(merged[i])
+    items = items_all[items_all[i].isin(keep_items)].reset_index(drop=True)
+
+    # 7. Users + social graph (edges within kept users only).
+    user_rows = []
+    social_rows = []
+    for uu in _iter_json(user_path):
+        uid = uu["user_id"]
+        if uid not in keep_users:
+            continue
+        user_rows.append({u: uid, "review_count": uu.get("review_count", 0)})
+        for fid in (uu.get("friends") or "").split(", "):
+            fid = fid.strip()
+            if fid and fid in keep_users and fid != uid:
+                a, b = sorted((uid, fid))
+                social_rows.append((a, b))
+    users = pd.DataFrame(user_rows)
+    social = pd.DataFrame(
+        sorted(set(social_rows)), columns=[u, "friend_id"]
+    )
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    merged.to_parquet(out_dir / "interactions.parquet", index=False)
+    users.to_parquet(out_dir / "users.parquet", index=False)
+    items.to_parquet(out_dir / "items.parquet", index=False)
+    social.to_parquet(out_dir / "social.parquet", index=False)
+
+    # Report the cold sets *as they will appear under a global split at T*.
+    train_users = set(merged[merged[t] <= cutoff][u])
+    train_items = set(merged[merged[t] <= cutoff][i])
+    test = merged[merged[t] > cutoff]
+    nat_cold_items = set(test[i]) - train_items
+    nat_cold_users = set(test[u]) - train_users
+    density = len(merged) / (len(users) * len(items) or 1)
+    print(
+        f"Wrote cross-regime slice to {out_dir}:\n"
+        f"  users={len(users):,} items={len(items):,} "
+        f"interactions={len(merged):,} density={density:.4%} "
+        f"social_edges={len(social):,}\n"
+        f"  cutoff T={pd.Timestamp(cutoff)} (q={cutoff_quantile})\n"
+        f"  injected cold items={len(cold_items):,} cold users={len(cold_users):,}\n"
+        f"  under global split @T -> cold items={len(nat_cold_items):,} "
+        f"cold users={len(nat_cold_users):,}"
+    )
+
+
 def downsample_processed(
     max_users: int = 2500,
     max_per_user: int | None = None,

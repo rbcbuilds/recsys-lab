@@ -176,31 +176,33 @@ Collaborative models cannot score an item with zero interactions. Content can:
 1. **Standalone** (`ContentBasedRecommender`): embed item text (sentence-transformers, or TF-IDF+SVD fallback) → user vector = mean of liked-item embeddings → cosine. `cold_item_ids()` lists catalog items never seen in train.
 2. **In the retriever** (`ContentTwoTowerRecommender`): item tower = MLP([id_emb ; text_emb]). Cold items are still embeddable (mean id-embedding + their text), so retrieval degrades gracefully as the catalog turns over — the usual production answer to "how do you handle new items?".
 
-### Cold-start, done honestly: one model, three slices
-The claim worth testing is "**one** pipeline handles warm users/items, cold items, **and** cold users." You don't get to retrain per regime — so we train **once** on a hard training set with two carve-outs, then score the *same* recommendations against three views of the test set (`scripts/cold_start.py`):
+### Cold-start, done honestly: one model, three slices (the headline result)
+The claim worth testing is "**one** pipeline handles warm users/items, cold items, **and** cold users." You don't get to retrain per regime — so we train **once**, then score the *same* recommendations against four views of the test set (`scripts/benchmark.py`):
+
+- Slices: **warm** (user & item both seen in train), **cold-item** (target item unseen in train), **cold-user** (user unseen in train). Overlap (cold user *and* cold item) is dropped for clean attribution.
+
+**Main construction — natural coldness via a global-time split.** The headline dataset is the *cross-regime* slice (`scripts/make_crossregime.py` → `data/processed_philly_xreg/`): keep the dense Philadelphia core, then inject a real low-activity tail of items and users whose activity is entirely *after* a global cutoff `T`. Evaluate with a single wall-clock split (`global_temporal_split`, cutoff at the 90th time percentile):
 
 ```
-temporal_split → cold_item_holdout(15%) → cold_user_holdout(15%, keep=0) → train_hard → fit ONCE
+train = interactions with t <= T        test = interactions with t > T
+cold_items = test items not in train    cold_users = test users not in train
 ```
 
-- `cold_item_holdout` strips a fraction of items entirely from train (real test targets, no train trace).
-- `cold_user_holdout(keep=0)` strips a fraction of users entirely from train — truly *new* users.
-- Slices: **warm** (user & item both seen), **cold-item** (target held out), **cold-user** (user held out). Overlap (cold user *and* cold item) is dropped for clean attribution.
+Because the injected tail is first-seen after `T`, it has **zero** training history — genuinely cold, no carve-out. Unlike a per-user split (which leaves every user with train history and so can never produce a cold *user*), one global cutoff makes both cold items and cold users arise naturally. Run `python scripts/benchmark.py` on the cross-regime slice.
 
-Why simulate instead of using *natural* cold items? Because the subset densifies to items with ≥10 reviews, so natural cold items (first-seen-in-test) number ~3 — too few to measure. Nothing is saved to disk; the whole split is a pure function of `(dataset, seed, fractions)`.
+**Results** (cross-regime Philadelphia, recall@20 — `python scripts/benchmark.py`):
 
-**Results** (shrunk slice, recall@20 — collaborative dies on both cold slices; each source rescues one regime):
+| model | overall | warm | cold-item | cold-user |
+|---|---|---|---|---|
+| popularity | 0.046 | 0.044 | 0.000 | 0.069 |
+| als / bpr | 0.017 | 0.027 | 0.000 | 0.000 |
+| sasrec | 0.037 | **0.060** | 0.000 | 0.000 |
+| two_stage | 0.023 | 0.039 | 0.000 | 0.000 |
+| **two_stage_unified** | **0.054** | 0.057 | 0.000 | **0.077** |
 
-| model | warm | cold-item | cold-user |
-|---|---|---|---|
-| als / two_tower | ~0.045 | 0.000 | 0.000 |
-| content_two_tower | 0.045 | **0.030** | 0.000 |
-| social / popularity | 0.076 | 0.000 | **0.068** |
-| **two_stage_unified** | **0.089** | 0.000* | **0.072** |
+The unified two-stage (`MultiRetriever[two-tower + content_based + social + popularity] → ranker`, see `scripts/benchmark.py::build_unified_two_stage`) wins on **overall and cold-user**; SASRec is strongest on warm among single-signal models.
 
-The unified two-stage (`MultiRetriever[two-tower + content + social + popularity] → ranker`, see `scripts/cold_start.py::build_unified_two_stage`) is **best on warm and cold-user** — the collaborative source carries warm, social/popularity carry cold users, and the ranker fuses them.
-
-**\*The cold-item finding (a real one).** The unified pipeline still scores ~0 on cold items even though its content source can retrieve them standalone (0.030). Diagnosis: it's **not** the ranker — it's the *data*. Yelp item text is only `name + categories` (~75 chars, e.g. `"Tuna Bar. Sushi Bars, Restaurants, Japanese"`), which clusters items by cuisine but can't pinpoint the specific next business. Evidence: only **3/50** cold-item test targets even reach the 200-candidate pool, and content-cosine barely separates relevant cold items (0.667 vs 0.625 warm). Attempts to force it (content-score ranker feature, cold-feature dropout, round-robin fusion) didn't help and slightly hurt the other slices — you can't rank cold items the retriever never surfaces, and you can't teach a ranker cold behavior when training has zero cold positives. **Text-based cold-start works only when the text is discriminative** (product descriptions, review text, news bodies), not 3-word category lists. *Extension point:* aggregate real Yelp **review text** per business into the item text to raise the ceiling.
+**\*The cold-item finding (a real one, unchanged by the natural slice).** Injecting *real* cold items makes the slice statistically credible; it does **not** raise the score. Cold-item recall stays low because it's the *data*, not the ranker: Yelp item text is only `name + categories` (~75 chars, e.g. `"Tuna Bar. Sushi Bars, Restaurants, Japanese"`), which clusters items by cuisine but can't pinpoint the specific next business. Content-cosine barely separates relevant cold items (0.667 vs 0.625 warm), so few cold targets even reach the candidate pool. Attempts to force it (content-score ranker feature, cold-feature dropout, round-robin fusion) didn't help and slightly hurt the other slices — you can't rank cold items the retriever never surfaces, and you can't teach a ranker cold behavior when training has zero cold positives. **Text-based cold-start works only when the text is discriminative** (product descriptions, review text, news bodies), not 3-word category lists. *Extension point:* aggregate real Yelp **review text** per business into the item text to raise the ceiling.
 
 ---
 
