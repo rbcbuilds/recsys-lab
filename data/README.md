@@ -42,6 +42,6 @@ loaders expect, so every model works identically on synthetic or real data.
 The full Yelp dataset is several GB and millions of reviews. A single dense
 metro area with active users keeps the interaction matrix small enough for fast
 laptop iteration while preserving real social edges, text, and (optionally)
-photos — the whole point of Path A.
+photos — the whole point of using a unified dataset.
 
 > Both `data/raw/` and `data/processed/` are gitignored. Never commit the dataset.

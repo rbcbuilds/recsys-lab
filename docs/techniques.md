@@ -1,7 +1,7 @@
 # Recsys Techniques — Quick Reference
 
-A short review sheet for the methods implemented in this lab. Each maps to a file
-in `src/recsys/models/` and a notebook in `notebooks/`.
+A concise reference for the methods implemented in this project. Each maps to a
+file in `src/recsys/models/` and a notebook in `notebooks/`.
 
 ---
 
@@ -26,12 +26,12 @@ Every model below is either a retriever, a ranker, or a baseline that does both 
 | Model | File | Type | One-line idea |
 |---|---|---|---|
 | Popularity / trending | `popularity.py` | Baseline | Recommend the most (recency-weighted) popular items. Cold-start fallback. |
-| Item-based CF | `item_cf.py` | Baseline | "Items co-liked by the same users are similar." Recommend items similar to your history. |
+| Item-based CF | `item_cf.py` | Baseline | "Items co-liked by the same users are similar." Recommend items similar to a user's history. |
 | ALS (matrix factorization) | `matrix_factorization.py` | Retrieval | Learn user & item vectors so that `user · item ≈ preference`. |
 | Two-tower | `two_tower.py` | Retrieval | Neural user tower + item tower in a shared space; score = dot product. Scales via ANN. |
 | LightGBM ranker | `ranker.py` | Ranking | Gradient-boosted trees re-order candidates using features. |
 | Two-stage | `two_stage.py` | Retrieval+Ranking | Two-tower retrieves → ranker re-orders. The production pattern. |
-| Social-neighbor CF | `social.py` | Signal / baseline | Recommend what your friends liked (trust-weighted). Also a *feature* for the ranker. |
+| Social-neighbor CF | `social.py` | Signal / baseline | Recommend what a user's friends liked (trust-weighted). Also a *feature* for the ranker. |
 
 ---
 
@@ -85,7 +85,7 @@ subset (`scripts/make_subset.py`).
 
 ---
 
-## Results so far (synthetic, recall@10 / ndcg@10)
+## Benchmark results (synthetic, recall@10 / ndcg@10)
 
 | Model | recall@10 | ndcg@10 |
 |---|---|---|
@@ -98,9 +98,13 @@ subset (`scripts/make_subset.py`).
 
 Takeaways: two-stage beats retrieval-alone; social adds a further lift as a ranker feature. Re-run on real Yelp for the honest numbers.
 
+> Numbers are on synthetic data (mechanics check). The synthetic friend graph is
+> built partly from latent taste, so treat the social lift as illustrative until
+> reproduced on the real Yelp friend graph.
+
 ---
 
-## Still to explore (scaffolds present)
+## Extension points (scaffolds present)
 
 - **Text / LLM embeddings** (`text_embeddings.py`) — semantic item vectors, cold-start.
 - **Graph / LightGCN** (`graph.py`) — propagate over the user–item graph.
