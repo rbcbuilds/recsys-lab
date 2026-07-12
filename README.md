@@ -52,14 +52,15 @@ Build top-to-bottom. Each phase has a module and (eventually) a notebook.
 3. Matrix factorization (ALS, implicit feedback) — `models/matrix_factorization.py`
 
 **Phase 2 — Retrieval + ranking**
-4. Two-tower retrieval (+ ANN) — `models/two_tower.py` *(scaffold)*
-5. Learning-to-rank re-ranker (LightGBM) — `models/ranker.py` *(scaffold)*
+4. Two-tower retrieval (+ ANN) — `models/two_tower.py`
+5. Learning-to-rank re-ranker (LightGBM) — `models/ranker.py`
+6. Two-stage (retrieve → re-rank) — `models/two_stage.py`  *(compare vs two-tower alone)*
 
 **Phase 3 — Modern layer (upgrades to the components above)**
-6. Text / LLM item embeddings — `models/text_embeddings.py` *(scaffold)*
-7. Graph recsys (LightGCN / Node2Vec on the user–item graph) — `models/graph.py` *(scaffold)*
-8. **Social recsys** (social-augmented recs from the real friend graph) — `models/social.py` *(scaffold)*
-9. Multimodal (image embeddings from photos) — `models/multimodal.py` *(scaffold)*
+7. Text / LLM item embeddings — `models/text_embeddings.py` *(scaffold)*
+8. Graph recsys (LightGCN / Node2Vec on the user–item graph) — `models/graph.py` *(scaffold)*
+9. **Social recsys** (social-augmented recs from the real friend graph) — `models/social.py` *(scaffold)*
+10. Multimodal (image embeddings from photos) — `models/multimodal.py` *(scaffold)*
 
 The golden rule throughout: **can this beat a well-tuned baseline?** That
 measurement skill is the real lesson.
@@ -118,5 +119,5 @@ for filter bubbles. All in `recsys.eval`.
 - [x] Project scaffold, config, data layer (synthetic + subsetter + loaders)
 - [x] Evaluation (temporal split + metrics)
 - [x] Phase 1 baselines (popularity, item-CF, ALS)
-- [ ] Phase 2 retrieval/ranking (two-tower, LightGBM ranker) — scaffolded
+- [x] Phase 2 retrieval/ranking (two-tower, LightGBM ranker, two-stage)
 - [ ] Phase 3 modern layer (text/LLM, graph, social, multimodal) — scaffolded

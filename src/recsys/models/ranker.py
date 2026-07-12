@@ -1,48 +1,244 @@
-"""Learning-to-rank re-ranker with LightGBM  [SCAFFOLD — Phase 2].
+"""Learning-to-rank re-ranker  [Phase 2 — implemented].
 
-Retrieval (popularity / item-CF / ALS / two-tower) gives you a few hundred
-candidates optimized for *recall*. A ranker then re-orders them for *precision*
-using rich features. This two-stage pattern (retrieve → rank) is the workhorse
-of most production recommenders.
+Retrieval (two-tower / ALS / item-CF) returns a few hundred candidates optimized
+for *recall*. This ranker re-orders them for *precision* using per-(user, item)
+features: the retrieval score plus user/item aggregates.
 
-Feature ideas (per user-item candidate pair):
-  * retrieval scores from the models above (great features!)
-  * user aggregates: activity count, avg rating, recency
-  * item aggregates: popularity, avg rating, age
-  * content similarity (from text/image embeddings)
-  * context: hour, day-of-week, location distance (Yelp has geo!)
+Backends (tried in order):
+  1. **LightGBM** ``lambdarank`` (preferred — true listwise LTR). On macOS this
+     needs OpenMP: ``brew install libomp``.
+  2. **sklearn HistGradientBoostingRegressor** (pointwise fallback — no extra
+     system libs). Still a real re-ranker; just not listwise.
 
-Use LightGBM's ``lambdarank`` objective with ``group`` = per-user candidate
-counts, and evaluate with NDCG@K. Train label = whether the candidate was a
-real future positive (from the temporal split).
+At serving time it only scores candidates handed to it — use
+:class:`~recsys.models.two_stage.TwoStageRecommender` for the full pipeline.
 
 References: Burges 2010 (LambdaMART); the RecSys "retrieve then rank" pattern.
 """
 
 from __future__ import annotations
 
-from typing import Dict, List
+from typing import Dict, List, Optional
 
+import numpy as np
 import pandas as pd
 
+from ..config import settings
 from .base import Recommender
 
 
 class LightGBMRanker(Recommender):
+    """Re-ranks a *candidate list* per user; does not retrieve from the full catalog.
+
+    Name kept as LightGBMRanker for the roadmap; may use sklearn if LightGBM's
+    native lib is unavailable.
+    """
+
     name = "lgbm_ranker"
 
-    def __init__(self, num_leaves: int = 63, n_estimators: int = 200):
+    FEATURE_NAMES = (
+        "retrieval_score",
+        "retrieval_rank",
+        "user_n",
+        "user_avg_rating",
+        "item_n",
+        "item_avg_rating",
+        "rating_gap",
+    )
+
+    def __init__(
+        self,
+        num_leaves: int = 31,
+        n_estimators: int = 100,
+        learning_rate: float = 0.05,
+        min_data_in_leaf: int = 20,
+        seed: int | None = None,
+        verbose: bool = False,
+        prefer_lightgbm: bool = True,
+    ):
         self.num_leaves = num_leaves
         self.n_estimators = n_estimators
+        self.learning_rate = learning_rate
+        self.min_data_in_leaf = min_data_in_leaf
+        self.seed = settings.seed if seed is None else seed
+        self.verbose = verbose
+        self.prefer_lightgbm = prefer_lightgbm
+        self._backend: str | None = None
+        self._model = None
+        self._user_stats: Dict[str, Dict[str, float]] = {}
+        self._item_stats: Dict[str, Dict[str, float]] = {}
+        self._global_avg = 3.0
 
-    def fit(self, train: pd.DataFrame) -> "LightGBMRanker":
-        raise NotImplementedError(
-            "LTR re-ranker is a Phase-2 exercise. Generate candidates from a "
-            "retrieval model, build user/item/context features, and train "
-            "LightGBM with objective='lambdarank'. See this module's docstring."
-        )
+    # ------------------------------------------------------------------ fit
+    def fit(
+        self,
+        train: pd.DataFrame,
+        candidates: Optional[Dict[str, List[str]]] = None,
+        retrieval_scores: Optional[Dict[str, Dict[str, float]]] = None,
+        labels: Optional[Dict[str, Dict[str, float]]] = None,
+    ) -> "LightGBMRanker":
+        if candidates is None or labels is None:
+            raise ValueError(
+                "LightGBMRanker.fit requires candidates= and labels=. "
+                "Use TwoStageRecommender to build them from a retriever."
+            )
+
+        self._build_stats(train)
+        retrieval_scores = retrieval_scores or {}
+
+        X_rows: List[List[float]] = []
+        y_rows: List[float] = []
+        groups: List[int] = []
+
+        for user_id, items in candidates.items():
+            if not items:
+                continue
+            rel = labels.get(user_id, {})
+            scores = retrieval_scores.get(user_id, {})
+            if not any(rel.get(it, 0) > 0 for it in items):
+                continue
+            for rank, item_id in enumerate(items):
+                X_rows.append(
+                    self._feature_row(user_id, item_id, scores.get(item_id, 0.0), rank)
+                )
+                y_rows.append(float(rel.get(item_id, 0.0)))
+            groups.append(len(items))
+
+        if not X_rows:
+            raise ValueError(
+                "No ranking training rows built. Check that candidates overlap "
+                "with labeled positives for at least some users."
+            )
+
+        X = np.asarray(X_rows, dtype=np.float32)
+        y = np.asarray(y_rows, dtype=np.float32)
+
+        if self.prefer_lightgbm and self._try_fit_lightgbm(X, y, groups):
+            return self
+        self._fit_sklearn(X, y)
+        return self
 
     def recommend(
         self, users: List[str], k: int = 10, exclude_seen: bool = True
     ) -> Dict[str, List[str]]:
-        raise NotImplementedError
+        raise NotImplementedError(
+            "LightGBMRanker only re-ranks candidates. Call "
+            "rerank(...) or use TwoStageRecommender."
+        )
+
+    # ---------------------------------------------------------------- rerank
+    def rerank(
+        self,
+        candidates: Dict[str, List[str]],
+        retrieval_scores: Optional[Dict[str, Dict[str, float]]] = None,
+        k: int = 10,
+    ) -> Dict[str, List[str]]:
+        if self._model is None:
+            raise RuntimeError("Call fit() before rerank().")
+
+        retrieval_scores = retrieval_scores or {}
+        out: Dict[str, List[str]] = {}
+        for user_id, items in candidates.items():
+            if not items:
+                out[user_id] = []
+                continue
+            scores = retrieval_scores.get(user_id, {})
+            X = np.asarray(
+                [
+                    self._feature_row(user_id, item_id, scores.get(item_id, 0.0), rank)
+                    for rank, item_id in enumerate(items)
+                ],
+                dtype=np.float32,
+            )
+            if self._backend == "lightgbm":
+                pred = self._model.predict(X)
+            else:
+                pred = self._model.predict(X)
+            order = np.argsort(-pred)[:k]
+            out[user_id] = [items[i] for i in order]
+        return out
+
+    # ------------------------------------------------------------- backends
+    def _try_fit_lightgbm(self, X: np.ndarray, y: np.ndarray, groups: List[int]) -> bool:
+        try:
+            import lightgbm as lgb
+
+            # Force-load the native lib here so we catch macOS libomp errors.
+            _ = lgb.__version__
+            dataset = lgb.Dataset(
+                X, label=y, group=groups, feature_name=list(self.FEATURE_NAMES)
+            )
+            params = {
+                "objective": "lambdarank",
+                "metric": "ndcg",
+                "ndcg_at": [settings.top_k],
+                "learning_rate": self.learning_rate,
+                "num_leaves": self.num_leaves,
+                "min_data_in_leaf": self.min_data_in_leaf,
+                "feature_fraction": 0.9,
+                "verbosity": 1 if self.verbose else -1,
+                "seed": self.seed,
+            }
+            self._model = lgb.train(params, dataset, num_boost_round=self.n_estimators)
+            self._backend = "lightgbm"
+            if self.verbose:
+                print(
+                    f"  ranker backend=lightgbm (lambdarank) "
+                    f"rows={len(y):,} groups={len(groups):,}"
+                )
+            return True
+        except Exception as exc:
+            if self.verbose:
+                print(f"  LightGBM unavailable ({exc.__class__.__name__}: {exc})")
+                print("  falling back to sklearn HistGradientBoosting (pointwise)")
+            return False
+
+    def _fit_sklearn(self, X: np.ndarray, y: np.ndarray) -> None:
+        from sklearn.ensemble import HistGradientBoostingRegressor
+
+        self._model = HistGradientBoostingRegressor(
+            max_depth=6,
+            max_iter=self.n_estimators,
+            learning_rate=self.learning_rate,
+            min_samples_leaf=self.min_data_in_leaf,
+            random_state=self.seed,
+        )
+        self._model.fit(X, y)
+        self._backend = "sklearn"
+        if self.verbose:
+            print(f"  ranker backend=sklearn (pointwise) rows={len(y):,}")
+
+    # ------------------------------------------------------------- features
+    def _build_stats(self, train: pd.DataFrame) -> None:
+        u, i, r = settings.user_col, settings.item_col, settings.rating_col
+        self._global_avg = float(train[r].mean()) if len(train) else 3.0
+
+        user_g = train.groupby(u)[r]
+        self._user_stats = {
+            uid: {"n": float(n), "avg": float(avg)}
+            for uid, n, avg in zip(
+                user_g.size().index, user_g.size().values, user_g.mean().values
+            )
+        }
+        item_g = train.groupby(i)[r]
+        self._item_stats = {
+            iid: {"n": float(n), "avg": float(avg)}
+            for iid, n, avg in zip(
+                item_g.size().index, item_g.size().values, item_g.mean().values
+            )
+        }
+
+    def _feature_row(
+        self, user_id: str, item_id: str, retrieval_score: float, rank: int
+    ) -> List[float]:
+        us = self._user_stats.get(user_id, {"n": 0.0, "avg": self._global_avg})
+        its = self._item_stats.get(item_id, {"n": 0.0, "avg": self._global_avg})
+        return [
+            float(retrieval_score),
+            float(rank),
+            us["n"],
+            us["avg"],
+            its["n"],
+            its["avg"],
+            us["avg"] - its["avg"],
+        ]

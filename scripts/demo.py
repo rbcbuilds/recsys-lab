@@ -25,6 +25,7 @@ from src.recsys.models import (
     ALSRecommender,
     ItemCFRecommender,
     PopularityRecommender,
+    TwoStageRecommender,
     TwoTowerRecommender,
 )
 
@@ -55,12 +56,20 @@ def main() -> None:
         print("(implicit not installed -> skipping ALS. `pip install implicit` to enable.)\n")
 
     # Two-tower needs torch; skip gracefully if missing.
+    # Keep standalone two-tower AND two-stage (two-tower → re-ranker) for comparison.
     try:
         import torch  # noqa: F401
 
         models.append(TwoTowerRecommender(dim=64, epochs=15))
+        models.append(
+            TwoStageRecommender(
+                retriever=TwoTowerRecommender(dim=64, epochs=15),
+                candidate_n=100,
+                verbose=False,
+            )
+        )
     except ImportError:
-        print("(torch not installed -> skipping two-tower. `pip install torch` to enable.)\n")
+        print("(torch not installed -> skipping two-tower / two-stage. `pip install torch` to enable.)\n")
 
     # Generate enough recommendations to score the largest K we evaluate at.
     max_k = max(settings.eval_ks)
@@ -68,6 +77,7 @@ def main() -> None:
     rows = []
     for model in models:
         label = model.name + ("_recency" if getattr(model, "recency_weighted", False) else "")
+        print(f"fitting {label}...")
         model.fit(train)
         recs = model.recommend(test_users, k=max_k)
         metrics = evaluate(recs, test_positives, ks=settings.eval_ks, n_items=ds.n_items)

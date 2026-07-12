@@ -1,10 +1,8 @@
 # Optional / heavier dependencies for Phase 2-3.
 # Install when you reach the relevant module:  pip install -r requirements-extra.txt
 
-# Phase 2 — ranking
-lightgbm>=4.0
-
 # Phase 2/3 — neural retrieval (two-tower) and multimodal encoders
+# (lightgbm moved to requirements.txt — needed for two-stage)
 torch>=2.1
 faiss-cpu>=1.7          # approximate nearest neighbor for retrieval
 
