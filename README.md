@@ -65,6 +65,10 @@ Build top-to-bottom. Each phase has a module and (eventually) a notebook.
 The golden rule throughout: **can this beat a well-tuned baseline?** That
 measurement skill is the real lesson.
 
+> **Review sheet:** see [`docs/techniques.md`](docs/techniques.md) for a short
+> summary of every technique, key concepts (ALS, GBM, in-batch negatives,
+> evaluation), and current results.
+
 ## Project structure
 
 ```
