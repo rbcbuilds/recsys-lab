@@ -48,6 +48,47 @@ def coverage(recommendations: Dict[str, List[str]], n_items: int, k: int) -> flo
     return len(shown) / n_items
 
 
+def evaluate_by_activity(
+    recommendations: Dict[str, List[str]],
+    ground_truth: Dict[str, Set[str]],
+    train_counts: Dict[str, int],
+    bins: Iterable[int] = (0, 5, 20, 10_000),
+    k: int | None = None,
+) -> "Dict[str, Dict[str, float]]":
+    """Slice metrics by how much *training* history each user had.
+
+    This is the key view for social recsys: social signal typically helps
+    **sparse** users (few interactions) most. ``train_counts`` maps user_id ->
+    number of training interactions. ``bins`` are right-open edges, so
+    (0, 5, 20, inf) yields buckets "0-4", "5-19", "20+".
+
+    Returns ``{bucket_label: metrics_dict}`` (metrics via :func:`evaluate`).
+    """
+    k = settings.top_k if k is None else k
+    edges = list(bins)
+    labels = []
+    for lo, hi in zip(edges[:-1], edges[1:]):
+        labels.append(f"{lo}-{hi - 1}" if hi < 10_000 else f"{lo}+")
+
+    buckets: Dict[str, Dict[str, Set[str]]] = {lab: {} for lab in labels}
+    for user_id, truth in ground_truth.items():
+        c = train_counts.get(user_id, 0)
+        for (lo, hi), lab in zip(zip(edges[:-1], edges[1:]), labels):
+            if lo <= c < hi:
+                buckets[lab][user_id] = truth
+                break
+
+    out: Dict[str, Dict[str, float]] = {}
+    for lab, gt in buckets.items():
+        if not gt:
+            out[lab] = {"n_users": 0}
+            continue
+        m = evaluate(recommendations, gt, ks=(k,))
+        m["n_users"] = len(gt)
+        out[lab] = m
+    return out
+
+
 def evaluate(
     recommendations: Dict[str, List[str]],
     ground_truth: Dict[str, Set[str]],
