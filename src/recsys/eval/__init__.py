@@ -9,11 +9,12 @@ from .metrics import (
     ndcg_at_k,
     recall_at_k,
 )
-from .split import cold_item_holdout, temporal_split
+from .split import cold_item_holdout, cold_user_holdout, temporal_split
 
 __all__ = [
     "temporal_split",
     "cold_item_holdout",
+    "cold_user_holdout",
     "evaluate",
     "evaluate_by_activity",
     "evaluate_cold_items",

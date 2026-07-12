@@ -54,6 +54,49 @@ def cold_item_holdout(
     return train[keep].reset_index(drop=True), cold_items
 
 
+def cold_user_holdout(
+    train: pd.DataFrame,
+    test_positives: dict[str, set],
+    cold_fraction: float = 0.15,
+    keep: int = 0,
+    seed: int | None = None,
+) -> tuple[pd.DataFrame, Set[str]]:
+    """Simulate cold-start users by stripping (most of) their training history.
+
+    Symmetric to :func:`cold_item_holdout`. Picks ``cold_fraction`` of users that
+    appear in both train and the test positives, and keeps only their ``keep``
+    earliest training interactions. With ``keep=0`` (default) the user is fully
+    new — absent from train — so collaborative models cannot represent them and
+    only social / popularity fallbacks can help. Use with
+    :func:`evaluate_cold_items` style slicing (see ``scripts/cold_start.py``).
+
+    Returns ``(train_with_cold_user_history_stripped, cold_user_ids)``.
+    """
+    u, t = settings.user_col, settings.time_col
+    seed = settings.seed if seed is None else seed
+
+    train_users = set(train[u].astype(str).unique())
+    test_users = {str(x) for x in test_positives.keys()}
+    eligible = sorted(train_users & test_users)
+    if not eligible:
+        return train.copy(), set()
+
+    rng = np.random.default_rng(seed)
+    n_cold = max(1, int(round(len(eligible) * cold_fraction)))
+    cold_users = set(rng.choice(eligible, size=n_cold, replace=False).tolist())
+
+    is_cold = train[u].astype(str).isin(cold_users)
+    if keep <= 0:
+        return train[~is_cold].reset_index(drop=True), cold_users
+
+    # keep > 0: retain each cold user's `keep` earliest interactions (sparse user).
+    kept_cold = (
+        train[is_cold].sort_values([u, t]).groupby(u, sort=False).head(keep)
+    )
+    out = pd.concat([train[~is_cold], kept_cold]).reset_index(drop=True)
+    return out, cold_users
+
+
 def temporal_split(
     interactions: pd.DataFrame,
     test_fraction: float | None = None,

@@ -30,6 +30,7 @@ from src.recsys.models import (
     MultiRetriever,
     PopularityRecommender,
     SASRecRecommender,
+    SocialRecommender,
     TwoStageRecommender,
     TwoTowerRecommender,
 )
@@ -101,17 +102,22 @@ def main() -> None:
                 verbose=False,
             )
         )
-        # Union of two retrievers (collaborative + content) fused by RRF, re-ranked.
+        # THE unified pipeline: union of complementary retrievers (collaborative +
+        # content + social + popularity) fused by RRF, then re-ranked with a social
+        # feature. Designed to stay non-zero for warm/cold users AND warm/cold items.
         models.append(
             TwoStageRecommender(
                 retriever=MultiRetriever(
                     [
                         TwoTowerRecommender(dim=64, epochs=15),
                         ContentTwoTowerRecommender(items=ds.items, dim=64, epochs=10),
+                        SocialRecommender(social=ds.social),
+                        PopularityRecommender(),
                     ]
                 ),
                 candidate_n=100,
-                use_social=False,
+                use_social=True,
+                social=ds.social,
                 verbose=False,
             )
         )
