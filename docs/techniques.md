@@ -172,8 +172,10 @@ SASRec replaces the user embedding with a **causal transformer over the recent i
 
 ### Text embeddings + cold start
 Collaborative models cannot score an item with zero interactions. Content can:
-1. **Standalone** (`TextEmbeddingRecommender`): embed item text (sentence-transformers, or TF-IDF+SVD fallback) → user vector = mean of liked-item embeddings → cosine. `cold_item_ids()` lists catalog items never seen in train.
-2. **In the retriever** (`ContentTwoTowerRecommender`): item tower = MLP([id_emb ; text_emb]). Collaborative signal + content in one model — the usual production answer to "how do you handle new items?".
+1. **Standalone** (`ContentBasedRecommender`): embed item text (sentence-transformers, or TF-IDF+SVD fallback) → user vector = mean of liked-item embeddings → cosine. `cold_item_ids()` lists catalog items never seen in train.
+2. **In the retriever** (`ContentTwoTowerRecommender`): item tower = MLP([id_emb ; text_emb]). Cold items are still embeddable (mean id-embedding + their text), so retrieval degrades gracefully as the catalog turns over — the usual production answer to "how do you handle new items?".
+
+**Measuring it** — `cold_item_holdout()` strips a fraction of items entirely from train (simulating cold items with real test targets), and `evaluate_cold_items()` reports recall restricted to those items. Run `scripts/cold_start.py`: collaborative retrievers score ≈0 on cold items; content-aware ones score > 0. (Natural cold items — first-seen-in-test — barely exist here because the subset densifies to items with ≥10 reviews, hence the simulated holdout.)
 
 ---
 

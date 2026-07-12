@@ -10,9 +10,48 @@ For each user we sort interactions by time and hold out the most recent
 
 from __future__ import annotations
 
+from typing import Set
+
+import numpy as np
 import pandas as pd
 
 from ..config import settings
+
+
+def cold_item_holdout(
+    train: pd.DataFrame,
+    test_positives: dict[str, set],
+    cold_fraction: float = 0.15,
+    seed: int | None = None,
+) -> tuple[pd.DataFrame, Set[str]]:
+    """Simulate cold-start items by stripping some items entirely from train.
+
+    Picks ``cold_fraction`` of items that appear in *both* train and the test
+    positives (so removal actually matters and there are targets to score), and
+    removes all their training interactions. The returned train set has no trace
+    of those items — collaborative models cannot represent them, while content
+    models still can (via item text). Use with :func:`evaluate_cold_items`.
+
+    Returns ``(train_without_cold_items, cold_item_ids)``.
+    """
+    i = settings.item_col
+    seed = settings.seed if seed is None else seed
+
+    train_items = set(train[i].astype(str).unique())
+    test_items: Set[str] = set()
+    for items in test_positives.values():
+        test_items |= {str(x) for x in items}
+
+    eligible = sorted(train_items & test_items)
+    if not eligible:
+        return train.copy(), set()
+
+    rng = np.random.default_rng(seed)
+    n_cold = max(1, int(round(len(eligible) * cold_fraction)))
+    cold_items = set(rng.choice(eligible, size=n_cold, replace=False).tolist())
+
+    keep = ~train[i].astype(str).isin(cold_items)
+    return train[keep].reset_index(drop=True), cold_items
 
 
 def temporal_split(

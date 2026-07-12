@@ -89,6 +89,37 @@ def evaluate_by_activity(
     return out
 
 
+def evaluate_cold_items(
+    recommendations: Dict[str, List[str]],
+    ground_truth: Dict[str, Set[str]],
+    cold_items: Set[str],
+    ks: Iterable[int] | None = None,
+) -> Dict[str, float]:
+    """Metrics restricted to cold items (the cold-start slice).
+
+    Ground truth is intersected with ``cold_items`` per user; only users with a
+    cold-item target are scored. Collaborative models score ~0 here (they can't
+    represent unseen items); content-aware models should score > 0. That gap is
+    the point of the cold-start experiment.
+
+    Returns :func:`evaluate` metrics plus ``n_users`` and ``n_cold_items``.
+    """
+    cold = {str(x) for x in cold_items}
+    cold_truth: Dict[str, Set[str]] = {}
+    for user_id, truth in ground_truth.items():
+        hit = {str(x) for x in truth} & cold
+        if hit:
+            cold_truth[user_id] = hit
+
+    if not cold_truth:
+        return {"n_users": 0, "n_cold_items": len(cold)}
+
+    m = evaluate(recommendations, cold_truth, ks=ks)
+    m["n_users"] = len(cold_truth)
+    m["n_cold_items"] = len(cold)
+    return m
+
+
 def evaluate(
     recommendations: Dict[str, List[str]],
     ground_truth: Dict[str, Set[str]],

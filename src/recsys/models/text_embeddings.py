@@ -1,23 +1,24 @@
-"""Text / LLM item embeddings + content-aware two-tower  [Phase 3].
+"""Content-based recommendation + content-aware two-tower  [Phase 3].
 
-Two complementary ways to use item text (name + categories + description):
+Two complementary ways to use item text (name + categories + description).
+Note: *content-based* is the classic contrast to *collaborative filtering* — it
+scores items from their features (text), so unlike CF it can rank items with
+zero interactions (cold items).
 
-1. ``TextEmbeddingRecommender`` — content-based CF.
+1. ``ContentBasedRecommender`` — pure content.
    Embed every item from its text. User vector = mean of liked-item embeddings.
-   Score = cosine. Works for **cold-start items** (text but no interactions)
-   and **cold-ish users** (few interactions but those items have text).
+   Score = cosine. Handles **cold items** (text but no interactions) and cold-ish
+   users. Weak on warm users vs collaborative signal — it is a cold-start tool.
 
-2. ``ContentTwoTowerRecommender`` — production pattern.
+2. ``ContentTwoTowerRecommender`` — hybrid retrieval (production pattern).
    Same in-batch-negative two-tower training as ``TwoTowerRecommender``, but the
-   item tower is ``MLP(id_emb ⊕ projected_text)``. Text enters retrieval as a
-   feature, not a replacement for collaborative signal.
+   item tower is ``MLP([id_emb ; text_emb])``. Collaborative id signal + content
+   in one retriever. Cold items still get an embedding (mean id-embedding + their
+   real text), so retrieval degrades gracefully as the catalog turns over.
 
 Encoder backends:
   * Preferred: ``sentence-transformers`` (``all-MiniLM-L6-v2``).
   * Fallback: TF-IDF → TruncatedSVD (no extra install; weaker but runnable).
-
-Cold-start evaluation helper: ``cold_item_ids()`` returns items present in the
-items table (with text) that never appear in training interactions.
 """
 
 from __future__ import annotations
@@ -86,10 +87,14 @@ def encode_item_text(
     return emb, item_ids, backend
 
 
-class TextEmbeddingRecommender(IndexedRecommender):
-    """Content-based recommender from item text embeddings."""
+class ContentBasedRecommender(IndexedRecommender):
+    """Pure content-based recommender from item text embeddings.
 
-    name = "text_embeddings"
+    Contrast with collaborative filtering: this uses only item *features*, so it
+    can score items that have zero interactions (cold items).
+    """
+
+    name = "content_based"
 
     def __init__(
         self,
@@ -113,11 +118,11 @@ class TextEmbeddingRecommender(IndexedRecommender):
 
     def fit(
         self, train: pd.DataFrame, items: pd.DataFrame | None = None
-    ) -> "TextEmbeddingRecommender":
+    ) -> "ContentBasedRecommender":
         items = items if items is not None else self.items
         if items is None:
             raise ValueError(
-                "TextEmbeddingRecommender needs items=Dataset.items "
+                "ContentBasedRecommender needs items=Dataset.items "
                 "(must include a text/name/categories column)."
             )
         self.items = items
@@ -130,7 +135,7 @@ class TextEmbeddingRecommender(IndexedRecommender):
         self._all_item_ids = item_ids
         self._item_id_to_row = {iid: n for n, iid in enumerate(item_ids)}
         self._item_emb = emb
-        self._train_item_ids = set(train[settings.item_col].unique())
+        self._train_item_ids = set(train[settings.item_col].astype(str).unique())
 
         # Align IndexedRecommender item space to *all* items with text (incl. cold).
         # Collaborative models only index train items; content can score cold ones.
@@ -143,9 +148,9 @@ class TextEmbeddingRecommender(IndexedRecommender):
         self._user_emb = {}
         for uid, grp in pos.groupby(u):
             rows = [
-                self._item_id_to_row[iid]
+                self._item_id_to_row[str(iid)]
                 for iid in grp[i].tolist()
-                if iid in self._item_id_to_row
+                if str(iid) in self._item_id_to_row
             ]
             if not rows:
                 continue
@@ -155,7 +160,7 @@ class TextEmbeddingRecommender(IndexedRecommender):
 
         # Popularity fallback for users with no positive text-backed history.
         pop = train.groupby(i).size()
-        self._pop_order = pop.sort_values(ascending=False).index.tolist()
+        self._pop_order = [str(x) for x in pop.sort_values(ascending=False).index.tolist()]
         return self
 
     def cold_item_ids(self) -> List[str]:
@@ -185,9 +190,10 @@ class TextEmbeddingRecommender(IndexedRecommender):
 class ContentTwoTowerRecommender(TwoTowerRecommender):
     """Two-tower retrieval with text features in the item tower.
 
-    Item representation = MLP([id_embedding ; text_embedding]). Collaborative
-    id signal + content signal in one retriever — the usual production pattern
-    for cold-start-aware retrieval.
+    Item representation = MLP([id_embedding ; text_embedding]). Collaborative id
+    signal + content signal in one retriever. Cold items (absent from training)
+    still get an embedding from their text plus a mean id-embedding, so they can
+    be retrieved — the production cold-start-aware pattern.
     """
 
     name = "content_two_tower"
@@ -227,7 +233,6 @@ class ContentTwoTowerRecommender(TwoTowerRecommender):
         self.svd_dim = svd_dim
         self.backend: str = ""
         self._text_dim: int = 0
-        self._text_by_train_idx: Optional[np.ndarray] = None
 
     def fit(
         self, train: pd.DataFrame, items: pd.DataFrame | None = None
@@ -242,7 +247,7 @@ class ContentTwoTowerRecommender(TwoTowerRecommender):
         torch.manual_seed(self.seed)
         np.random.seed(self.seed)
 
-        # Build collaborative index first, then align text rows to train item order.
+        # Collaborative index over TRAIN items, then align text to that order.
         self._build_index(train)
         emb, item_ids, backend = encode_item_text(
             items, model_name=self.model_name, svd_dim=self.svd_dim, seed=self.seed
@@ -251,12 +256,13 @@ class ContentTwoTowerRecommender(TwoTowerRecommender):
         id_to_row = {iid: n for n, iid in enumerate(item_ids)}
         text_dim = emb.shape[1]
         self._text_dim = text_dim
+
+        train_item_to_idx = dict(self.item_to_idx)  # keep before we overwrite below
         aligned = np.zeros((len(self.item_ids), text_dim), dtype=np.float32)
         for j, iid in enumerate(self.item_ids):
-            r = id_to_row.get(iid)
+            r = id_to_row.get(str(iid))
             if r is not None:
                 aligned[j] = emb[r]
-        self._text_by_train_idx = aligned
 
         device = self._resolve_device(torch)
         u, i = settings.user_col, settings.item_col
@@ -266,7 +272,6 @@ class ContentTwoTowerRecommender(TwoTowerRecommender):
         item_idx = torch.as_tensor(
             train[i].map(self.item_to_idx).to_numpy(), dtype=torch.long
         )
-        text_t = torch.as_tensor(aligned, dtype=torch.float32)
 
         self._model = _ContentTwoTowerNet(
             n_users=len(self.user_ids),
@@ -275,8 +280,7 @@ class ContentTwoTowerRecommender(TwoTowerRecommender):
             text_dim=text_dim,
             normalize=self.normalize,
         ).to(device)
-        text_t = text_t.to(device)
-        self._model.set_text(text_t)
+        self._model.set_text(torch.as_tensor(aligned, dtype=torch.float32, device=device))
 
         opt = torch.optim.Adam(
             self._model.parameters(), lr=self.lr, weight_decay=self.weight_decay
@@ -304,10 +308,31 @@ class ContentTwoTowerRecommender(TwoTowerRecommender):
             if self.verbose:
                 print(f"  epoch {epoch + 1:>2}/{self.epochs}  loss={total / n:.4f}")
 
-        with torch.no_grad():
-            self._item_matrix = self._model.all_item_vectors().cpu().numpy()
+        # Build the retrieval matrix over the FULL catalog (with text), so cold
+        # items — those not in train — are still embeddable and retrievable.
+        self._build_full_item_matrix(torch, emb, item_ids, train_item_to_idx, device)
         self._maybe_build_faiss()
         return self
+
+    def _build_full_item_matrix(
+        self, torch, emb, item_ids, train_item_to_idx, device
+    ) -> None:
+        """Embed every catalog item; cold items use the mean trained id-embedding."""
+        with torch.no_grad():
+            id_weight = self._model.item_id_emb.weight  # (n_train, dim)
+            mean_id = id_weight.mean(dim=0)
+            id_rows = torch.empty(len(item_ids), self.dim, device=device)
+            for n, iid in enumerate(item_ids):
+                j = train_item_to_idx.get(str(iid))
+                id_rows[n] = id_weight[j] if j is not None else mean_id
+            text_full = torch.as_tensor(emb, dtype=torch.float32, device=device)
+            vecs = self._model.item_from_parts(id_rows, text_full)
+            self._item_matrix = vecs.cpu().numpy()
+
+        # Reset the recommender's item space to the full catalog.
+        self.item_ids = [str(x) for x in item_ids]
+        self.item_to_idx = {iid: n for n, iid in enumerate(self.item_ids)}
+        self.idx_to_item = np.array(self.item_ids)
 
 
 try:
@@ -348,6 +373,10 @@ try:
             id_v = self.item_id_emb(idx)
             tx = self.text_emb[idx]
             return self._maybe_norm(self.item_proj(torch.cat([id_v, tx], dim=-1)))
+
+        def item_from_parts(self, id_v, text_v):
+            """Item vectors from explicit id + text parts (used for cold items)."""
+            return self._maybe_norm(self.item_proj(torch.cat([id_v, text_v], dim=-1)))
 
         def all_item_vectors(self):
             idx = torch.arange(

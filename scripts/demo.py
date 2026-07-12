@@ -24,11 +24,12 @@ from src.recsys.eval import evaluate, temporal_split
 from src.recsys.models import (
     ALSRecommender,
     BPRRecommender,
+    ContentBasedRecommender,
     ContentTwoTowerRecommender,
     ItemCFRecommender,
+    MultiRetriever,
     PopularityRecommender,
     SASRecRecommender,
-    TextEmbeddingRecommender,
     TwoStageRecommender,
     TwoTowerRecommender,
 )
@@ -90,11 +91,35 @@ def main() -> None:
                 verbose=False,
             )
         )
+        # Content-aware retriever + social feature (cold-start-aware two-stage).
+        models.append(
+            TwoStageRecommender(
+                retriever=ContentTwoTowerRecommender(items=ds.items, dim=64, epochs=10),
+                candidate_n=100,
+                use_social=True,
+                social=ds.social,
+                verbose=False,
+            )
+        )
+        # Union of two retrievers (collaborative + content) fused by RRF, re-ranked.
+        models.append(
+            TwoStageRecommender(
+                retriever=MultiRetriever(
+                    [
+                        TwoTowerRecommender(dim=64, epochs=15),
+                        ContentTwoTowerRecommender(items=ds.items, dim=64, epochs=10),
+                    ]
+                ),
+                candidate_n=100,
+                use_social=False,
+                verbose=False,
+            )
+        )
     except ImportError:
         print("(torch not installed -> skipping neural models. `pip install torch` to enable.)\n")
 
-    # Text embeddings: sentence-transformers if available, else TF-IDF+SVD fallback.
-    models.append(TextEmbeddingRecommender(items=ds.items))
+    # Pure content-based (cold-start tool): sentence-transformers or TF-IDF+SVD.
+    models.append(ContentBasedRecommender(items=ds.items))
 
     # Generate enough recommendations to score the largest K we evaluate at.
     max_k = max(settings.eval_ks)
@@ -104,10 +129,15 @@ def main() -> None:
         label = model.name
         if getattr(model, "recency_weighted", False):
             label += "_recency"
-        if getattr(model, "use_social", False):
+        if model.name == "two_stage":
+            retr = getattr(model.retriever, "name", "")
+            if retr == "content_two_tower":
+                label += "_content"
+            elif retr == "multi_retriever":
+                label += "_multi"
+            label += "_social" if getattr(model, "use_social", False) else "_no_social"
+        elif getattr(model, "use_social", False):
             label += "_social"
-        elif model.name == "two_stage":
-            label += "_no_social"
         print(f"fitting {label}...")
         model.fit(train)
         recs = model.recommend(test_users, k=max_k)

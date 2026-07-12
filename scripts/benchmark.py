@@ -35,11 +35,11 @@ from src.recsys.eval import evaluate, temporal_split
 from src.recsys.models import (
     ALSRecommender,
     BPRRecommender,
+    ContentBasedRecommender,
     ContentTwoTowerRecommender,
     PopularityRecommender,
     SASRecRecommender,
     SocialRecommender,
-    TextEmbeddingRecommender,
     TwoStageRecommender,
     TwoTowerRecommender,
 )
@@ -56,13 +56,19 @@ def build_models(ds):
         "bpr": BPRRecommender(factors=64, iterations=80),
         "social": SocialRecommender(social=ds.social),
         "sasrec": SASRecRecommender(dim=64, epochs=15, max_len=50),
-        "text_embeddings": TextEmbeddingRecommender(items=ds.items),
+        "content_based": ContentBasedRecommender(items=ds.items),
         "content_two_tower": ContentTwoTowerRecommender(items=ds.items, dim=64, epochs=10),
         "two_stage_no_social": TwoStageRecommender(
             TwoTowerRecommender(dim=64, epochs=10), candidate_n=200, use_social=False
         ),
         "two_stage_social": TwoStageRecommender(
             TwoTowerRecommender(dim=64, epochs=10),
+            candidate_n=200,
+            use_social=True,
+            social=ds.social,
+        ),
+        "two_stage_content_social": TwoStageRecommender(
+            ContentTwoTowerRecommender(items=ds.items, dim=64, epochs=10),
             candidate_n=200,
             use_social=True,
             social=ds.social,

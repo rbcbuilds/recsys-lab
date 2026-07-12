@@ -4,16 +4,19 @@ from .metrics import (
     coverage,
     evaluate,
     evaluate_by_activity,
+    evaluate_cold_items,
     hit_rate_at_k,
     ndcg_at_k,
     recall_at_k,
 )
-from .split import temporal_split
+from .split import cold_item_holdout, temporal_split
 
 __all__ = [
     "temporal_split",
+    "cold_item_holdout",
     "evaluate",
     "evaluate_by_activity",
+    "evaluate_cold_items",
     "recall_at_k",
     "ndcg_at_k",
     "hit_rate_at_k",
