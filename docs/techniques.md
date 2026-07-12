@@ -27,25 +27,124 @@ Every model below is either a retriever, a ranker, or a baseline that does both 
 |---|---|---|---|
 | Popularity / trending | `popularity.py` | Baseline | Recommend the most (recency-weighted) popular items. Cold-start fallback. |
 | Item-based CF | `item_cf.py` | Baseline | "Items co-liked by the same users are similar." Recommend items similar to a user's history. |
-| ALS (matrix factorization) | `matrix_factorization.py` | Retrieval | Learn user & item vectors so that `user · item ≈ preference`. |
+| ALS (matrix factorization) | `matrix_factorization.py` | Retrieval | Learn user & item vectors so that `user · item ≈ preference` (pointwise / confidence-weighted). |
+| BPR | `bpr.py` | Retrieval | Same MF factors as ALS; pairwise ranking loss (observed > unobserved). |
 | Two-tower | `two_tower.py` | Retrieval | Neural user tower + item tower in a shared space; score = dot product. Scales via ANN. |
 | LightGBM ranker | `ranker.py` | Ranking | Gradient-boosted trees re-order candidates using features. |
 | Two-stage | `two_stage.py` | Retrieval+Ranking | Two-tower retrieves → ranker re-orders. The production pattern. |
 | Social-neighbor CF | `social.py` | Signal / baseline | Recommend what a user's friends liked (trust-weighted). Also a *feature* for the ranker. |
+| SASRec | `sasrec.py` | Sequential retrieval | Causal self-attention over the user's recent item sequence; predicts next item. |
+| Text embeddings | `text_embeddings.py` | Content / cold-start | Encode item text; user = mean of liked-item vectors; cosine score. |
+| Content two-tower | `text_embeddings.py` | Retrieval | Two-tower with text concatenated into the item tower (production cold-start pattern). |
+
+---
+
+## Collaborative filtering — method classes
+
+### Memory-based CF
+
+**User-user CF**: find users with similar rating vectors (cosine or Pearson), recommend what they liked. Doesn't scale — user space is large and the matrix is sparse.
+
+**Item-item CF**: find items similar to what a user has interacted with. Item similarities are precomputed and stable → scales better than user-user. Amazon's original algorithm.
+
+**Why memory-based fails at scale**: the rating matrix is extremely sparse (most users rate <0.1% of items), so similarity estimates are unreliable.
+
+---
+
+### Matrix factorization
+
+**SVD / FunkSVD**: decompose `R ≈ U·Vᵀ`, minimize squared error on *observed* ratings via SGD. Classic for explicit feedback (star ratings).
+
+**ALS (Alternating Least Squares)**: same decomposition but solves U and V alternately in closed form. Handles implicit feedback with confidence weighting: `c_ui = 1 + α·r_ui` where `r_ui = 1` if the user interacted, 0 otherwise. Fast, parallelizable, still used in production. **Alternate** means: freeze items → solve users (least squares) → freeze users → solve items → repeat.
+
+**BPR (Bayesian Personalized Ranking)**: optimizes pairwise ranking — observed items should rank above unobserved. Loss: `Σ -log σ(x̂_ui - x̂_uj)` for (u, i, j) where i is observed, j is not. Better objective than pointwise MSE for implicit data.
+
+---
+
+### Neural CF
+
+**NCF / NeuMF**: replaces the dot product in MF with an MLP, learning non-linear user×item interactions. Outperforms pure MF on dense datasets.
+
+**Two-tower (dual encoder)**: separate neural networks for user and item → shared embedding space. Score = dot product. The standard for *retrieval at scale*: item embeddings are precomputed once, ANN (FAISS/ScaNN) retrieves top-K in milliseconds.
+
+Trained with **in-batch negatives** (sampled softmax): within a batch of (user, positive-item) pairs, every other item is a negative. Popularity bias: popular items appear as negatives more often → their scores get suppressed. Corrected with logQ correction or hard negative mining.
+
+The item tower is where text/image/graph/social features get injected.
+
+---
+
+### Sequential / session-based CF
+
+Models the *order* of interactions, not just the set. No persistent user embedding — user is their recent history window.
+
+**GRU4Rec**: RNN over item sequence. First neural sequential rec paper.
+
+**SASRec**: self-attention (transformer decoder) over item sequences. Faster than RNN, captures long-range dependencies. Current strong baseline.
+
+**BERT4Rec**: bidirectional transformer with masked item prediction (BERT-style pretraining). Slightly stronger than SASRec on dense data, slower.
+
+Use when: recency and order matter (e-commerce, streaming, news). Less useful when taste is stable over long periods.
+
+---
+
+### Graph-based CF
+
+**LightGCN**: propagates user and item embeddings over the user–item bipartite graph via weighted sum (no non-linearity). Final embedding = average across propagation layers. Strong on sparse data; captures multi-hop signals. Expensive — full graph must be in memory.
+
+**Social CF (GraphRec, DiffNet)**: adds the social/friend graph as a second propagation path. Helps cold-start users who have friends with rich histories.
+
+---
+
+### Factorization machines (ranker stage)
+
+**FM**: generalizes MF to arbitrary feature vectors. Models all pairwise feature interactions: `ŷ = w₀ + Σwᵢxᵢ + Σᵢ<ⱼ <vᵢ,vⱼ>xᵢxⱼ`. Interaction term is O(nk) via the FM trick (not O(n²)).
+
+**DeepFM**: FM (2nd-order interactions) + DNN (higher-order) sharing the same input embeddings. Used as a ranker in production systems.
+
+---
+
+### When to use what
+
+| Situation | Method |
+|---|---|
+| Explicit ratings, small scale | SVD / ALS |
+| Implicit, millions of items | Two-tower retrieval → BPR/LambdaRank ranker |
+| Sequential behavior matters | SASRec / BERT4Rec |
+| Rich side features available | DeepFM / two-tower with feature inputs |
+| Social/graph signal available | LightGCN or social feature in ranker |
+| Cold start | Content tower (text/image) + popularity fallback |
 
 ---
 
 ## Key concepts
 
 ### Implicit vs explicit feedback
-- **Explicit**: ratings/stars (user states preference).
-- **Implicit**: clicks/views/reviews-exist (preference inferred). Most real data. ALS uses **confidence weighting** (`alpha`): seen = confidently positive, unseen = weakly negative.
+- **Explicit**: ratings/stars (user directly states preference). Clean signal, rare — most users don't rate things.
+- **Implicit**: preference inferred from behavior — a purchase, click, play, or review existing regardless of score. Noisy but abundant. Most production systems run on implicit data.
+
+| | Explicit | Implicit |
+|---|---|---|
+| What you observe | Actual preference score | Binary interaction (seen / not seen) |
+| Unobserved = | Missing data | Weakly negative (probably not relevant) |
+| Loss function | MSE on observed ratings | Confidence-weighted MSE (ALS) or pairwise ranking (BPR) |
+| Metric | RMSE | Recall@K, NDCG@K |
+
+**Why use ALS as implicit even when star ratings exist (e.g. Yelp)?**
+The task is *what to recommend next*, not *what score will they give*. Using implicit:
+1. Lets you model the 99.9% of unreviewed items ("didn't interact = probably not relevant") — explicit MF ignores unobserved entries entirely.
+2. Is more robust to selection bias: people rate things they already chose to visit, so the rating distribution is not a random sample of preferences.
+3. The *act* of reviewing is the relevance signal; the star value feeds downstream (as a ranker feature or `positive_threshold` filter), not into retrieval.
+
+Typical production split of rating signals:
+- **Retrieval** (ALS / two-tower): implicit — did they interact?
+- **Ranker**: uses stars as a feature (`user_avg_rating`, `item_avg_rating`, `rating_gap`)
+- **Rating prediction**: separate model only if the product needs to display a predicted score
 
 ### ALS (Alternating Least Squares)
-Factor the sparse user×item matrix `R ≈ U·Vᵀ`. Solving both sides at once is hard, so **alternate**: freeze items → solve users (closed-form least squares) → freeze users → solve items. Repeat. Fast, strong baseline for implicit feedback.
+See matrix factorization above.
 
 ### Two-tower + in-batch negatives
-Two embedding towers; score = dot product. Trained with **in-batch negatives** (sampled softmax): within a batch of (user, positive-item) pairs, every *other* item is a negative. At serving time embed items once, use **ANN** (e.g. FAISS) for fast nearest-neighbor retrieval. The item tower is where extra features (text/image/graph/social) get injected later.
+See neural CF above.
 
 ### GBM (Gradient Boosting Machine)
 Build many small decision trees **sequentially**, each correcting the previous ensemble's errors (defined by the loss **gradient**). LightGBM/HistGradientBoosting are implementations.
@@ -57,6 +156,24 @@ Build many small decision trees **sequentially**, each correcting the previous e
 - **trust**: `uniform` (all friends equal) or `jaccard` (share of common items).
 - Popularity back-off handles friendless/cold users.
 - Best used as a **feature into the ranker** (`use_social=True`), not standalone.
+
+### ALS vs BPR (same factors, different loss)
+- **ALS**: pointwise. Reconstructs a confidence-weighted preference matrix. Strong when interaction counts are informative.
+- **BPR**: pairwise. For each (user, observed i, unobserved j), push `score(u,i) > score(u,j)`. Directly optimizes ranking.
+- Run both on the same split (`ALSRecommender` vs `BPRRecommender`) to isolate the objective. Library-matched via `implicit`.
+
+### SASRec (sequence vs set)
+Static user embeddings (ALS, two-tower id table) average a user's whole history into one vector. That breaks when:
+- intent is session-local (just browsed sushi → next rec should shift)
+- taste drifts over time
+- order of interactions matters more than the bag of items
+
+SASRec replaces the user embedding with a **causal transformer over the recent item sequence**. Training target = next item at each position. Inference = last hidden state · item embedding matrix. Implemented in `sasrec.py`.
+
+### Text embeddings + cold start
+Collaborative models cannot score an item with zero interactions. Content can:
+1. **Standalone** (`TextEmbeddingRecommender`): embed item text (sentence-transformers, or TF-IDF+SVD fallback) → user vector = mean of liked-item embeddings → cosine. `cold_item_ids()` lists catalog items never seen in train.
+2. **In the retriever** (`ContentTwoTowerRecommender`): item tower = MLP([id_emb ; text_emb]). Collaborative signal + content in one model — the usual production answer to "how do you handle new items?".
 
 ---
 
@@ -106,7 +223,6 @@ Takeaways: two-stage beats retrieval-alone; social adds a further lift as a rank
 
 ## Extension points (scaffolds present)
 
-- **Text / LLM embeddings** (`text_embeddings.py`) — semantic item vectors, cold-start.
 - **Graph / LightGCN** (`graph.py`) — propagate over the user–item graph.
 - **Multimodal** (`multimodal.py`) — image embeddings (CLIP) from Yelp photos.
 - **Richer ranker features** — text/image similarity, geo distance, context.

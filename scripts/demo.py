@@ -23,8 +23,12 @@ from src.recsys.data import load_dataset
 from src.recsys.eval import evaluate, temporal_split
 from src.recsys.models import (
     ALSRecommender,
+    BPRRecommender,
+    ContentTwoTowerRecommender,
     ItemCFRecommender,
     PopularityRecommender,
+    SASRecRecommender,
+    TextEmbeddingRecommender,
     TwoStageRecommender,
     TwoTowerRecommender,
 )
@@ -47,20 +51,27 @@ def main() -> None:
         PopularityRecommender(recency_weighted=True),
         ItemCFRecommender(top_n_neighbors=50),
     ]
-    # ALS needs the optional 'implicit' package; skip gracefully if missing.
+    # ALS / BPR need the optional 'implicit' package; skip gracefully if missing.
     try:
         import implicit  # noqa: F401
 
         models.append(ALSRecommender(factors=64, iterations=15))
+        models.append(BPRRecommender(factors=64, iterations=50))
     except ImportError:
-        print("(implicit not installed -> skipping ALS. `pip install implicit` to enable.)\n")
+        print("(implicit not installed -> skipping ALS/BPR. `pip install implicit` to enable.)\n")
 
-    # Two-tower needs torch; skip gracefully if missing.
+    # Two-tower / SASRec need torch; skip gracefully if missing.
     # Keep standalone two-tower AND two-stage (two-tower → re-ranker) for comparison.
     try:
         import torch  # noqa: F401
 
         models.append(TwoTowerRecommender(dim=64, epochs=15))
+        models.append(SASRecRecommender(dim=64, epochs=10, max_len=40))
+        models.append(
+            ContentTwoTowerRecommender(
+                items=ds.items, dim=64, epochs=10, verbose=False
+            )
+        )
         models.append(
             TwoStageRecommender(
                 retriever=TwoTowerRecommender(dim=64, epochs=15),
@@ -80,7 +91,10 @@ def main() -> None:
             )
         )
     except ImportError:
-        print("(torch not installed -> skipping two-tower / two-stage. `pip install torch` to enable.)\n")
+        print("(torch not installed -> skipping neural models. `pip install torch` to enable.)\n")
+
+    # Text embeddings: sentence-transformers if available, else TF-IDF+SVD fallback.
+    models.append(TextEmbeddingRecommender(items=ds.items))
 
     # Generate enough recommendations to score the largest K we evaluate at.
     max_k = max(settings.eval_ks)

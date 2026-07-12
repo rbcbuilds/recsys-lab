@@ -7,8 +7,9 @@ same skeleton, so the whole system fits together instead of living as disconnect
 demos.
 
 **What this builds:**
-- Classical baselines (popularity, item-CF, ALS matrix factorization)
+- Classical baselines (popularity, item-CF, ALS, BPR)
 - A two-stage retrieval → ranking pipeline (two-tower + gradient-boosted ranker)
+- Sequential retrieval (SASRec) and text/LLM item embeddings for cold start
 - A social-graph signal wired in as both a standalone model and a ranker feature
 - Honest evaluation (temporal split, Recall/NDCG, activity-sliced metrics)
 - A synthetic data generator so the full pipeline runs with zero downloads
@@ -56,17 +57,19 @@ Built top-to-bottom. Each phase has a module and a notebook.
 1. Popularity / trending — `models/popularity.py`
 2. Item-based collaborative filtering — `models/item_cf.py`
 3. Matrix factorization (ALS, implicit feedback) — `models/matrix_factorization.py`
+4. BPR (pairwise ranking MF) — `models/bpr.py`
 
 **Phase 2 — Retrieval + ranking**
-4. Two-tower retrieval (+ ANN) — `models/two_tower.py`
-5. Learning-to-rank re-ranker (LightGBM) — `models/ranker.py`
-6. Two-stage (retrieve → re-rank) — `models/two_stage.py`  *(compare vs two-tower alone)*
+5. Two-tower retrieval (+ ANN) — `models/two_tower.py`
+6. Learning-to-rank re-ranker (LightGBM) — `models/ranker.py`
+7. Two-stage (retrieve → re-rank) — `models/two_stage.py`  *(compare vs two-tower alone)*
 
-**Phase 3 — Modern layer (upgrades to the components above)**
-7. Text / LLM item embeddings — `models/text_embeddings.py` *(scaffold)*
-8. Graph recsys (LightGCN / Node2Vec on the user–item graph) — `models/graph.py` *(scaffold)*
-9. **Social recsys** (social-augmented recs from the real friend graph) — `models/social.py` *(scaffold)*
-10. Multimodal (image embeddings from photos) — `models/multimodal.py` *(scaffold)*
+**Phase 3 — Modern layer**
+8. **Social recsys** — `models/social.py` (standalone + ranker feature)
+9. **SASRec** (sequential / self-attentive) — `models/sasrec.py`
+10. **Text / LLM item embeddings + content two-tower** — `models/text_embeddings.py`
+11. Graph recsys (LightGCN / Node2Vec) — `models/graph.py` *(scaffold)*
+12. Multimodal (image embeddings from photos) — `models/multimodal.py` *(scaffold)*
 
 The question driving every addition: **can it beat a well-tuned baseline?**
 
@@ -162,13 +165,15 @@ for filter bubbles. All in `recsys.eval`.
 
 - [x] Project scaffold, config, data layer (synthetic + subsetter + loaders)
 - [x] Evaluation (temporal split + metrics)
-- [x] Phase 1 baselines (popularity, item-CF, ALS)
+- [x] Phase 1 baselines (popularity, item-CF, ALS, BPR)
 - [x] Phase 2 retrieval/ranking (two-tower, LightGBM ranker, two-stage)
 - [x] Social signal (standalone model + ranker feature)
+- [x] SASRec (sequential self-attentive retrieval)
+- [x] Text embeddings + content two-tower (cold-start path)
 
-**Extension points** (scaffolded, ready to build on): text/LLM item embeddings,
-graph models (LightGCN/Node2Vec), and multimodal (image) signals — each slots
-into the existing retrieval → ranking skeleton.
+**Extension points** (scaffolded): graph models (LightGCN/Node2Vec) and
+multimodal (image) signals — each slots into the existing retrieval → ranking
+skeleton.
 
 ## License
 

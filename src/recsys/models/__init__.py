@@ -1,27 +1,32 @@
-"""Models: working Phase-1/2 recommenders + scaffolds for Phase 3.
+"""Models: working recommenders + scaffolds for remaining Phase-3 modules.
 
 Working now:
-    PopularityRecommender      - popularity / trending baseline
-    ItemCFRecommender          - item-based collaborative filtering
-    ALSRecommender             - matrix factorization (implicit ALS)
-    TwoTowerRecommender        - neural retrieval (in-batch negatives + ANN)
-    LightGBMRanker             - learning-to-rank re-ranker (candidates only)
-    TwoStageRecommender        - retrieve (e.g. two-tower) → LightGBM re-rank
-
-    SocialRecommender          - social-neighbor CF from the friend graph
+    PopularityRecommender         - popularity / trending baseline
+    ItemCFRecommender             - item-based collaborative filtering
+    ALSRecommender                - matrix factorization (implicit ALS, pointwise)
+    BPRRecommender                - same MF family, pairwise ranking loss
+    TwoTowerRecommender           - neural retrieval (in-batch negatives + ANN)
+    LightGBMRanker                - learning-to-rank re-ranker (candidates only)
+    TwoStageRecommender           - retrieve → LightGBM re-rank
+    SocialRecommender             - social-neighbor CF from the friend graph
+    SASRecRecommender             - self-attentive sequential recommendation
+    TextEmbeddingRecommender       - content CF from item text (cold-start capable)
+    ContentTwoTowerRecommender    - two-tower with text in the item tower
 
 Scaffolds (documented interfaces + guidance, raise NotImplementedError):
-    text_embeddings.TextEmbeddingRecommender
     graph.LightGCNRecommender
     multimodal.ImageEmbeddingRecommender
 """
 
 from .base import Recommender
+from .bpr import BPRRecommender
 from .item_cf import ItemCFRecommender
 from .matrix_factorization import ALSRecommender
 from .popularity import PopularityRecommender
 from .ranker import LightGBMRanker
+from .sasrec import SASRecRecommender
 from .social import SocialRecommender
+from .text_embeddings import ContentTwoTowerRecommender, TextEmbeddingRecommender
 from .two_stage import TwoStageRecommender
 from .two_tower import TwoTowerRecommender
 
@@ -30,8 +35,12 @@ __all__ = [
     "PopularityRecommender",
     "ItemCFRecommender",
     "ALSRecommender",
+    "BPRRecommender",
     "TwoTowerRecommender",
     "LightGBMRanker",
     "TwoStageRecommender",
     "SocialRecommender",
+    "SASRecRecommender",
+    "TextEmbeddingRecommender",
+    "ContentTwoTowerRecommender",
 ]
