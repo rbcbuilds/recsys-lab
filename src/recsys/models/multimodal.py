@@ -1,4 +1,4 @@
-"""Multimodal (image) recommendation  [SCAFFOLD — Phase 3].
+"""Multimodal (image) recommendation  [SCAFFOLD — Tier 2].
 
 Encode item photos into vectors (CLIP or a ResNet) and use them like the text
 embeddings — most valuable for cold-start items that have a photo but no

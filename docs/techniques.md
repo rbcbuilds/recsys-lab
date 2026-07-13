@@ -38,7 +38,9 @@ Every model below is either a retriever, a ranker, or a baseline that does both 
 | Content two-tower | `text_embeddings.py` | Retrieval | Two-tower with text concatenated into the item tower (production cold-start pattern). |
 | MultiRetriever | `multi_retriever.py` | Retrieval | Union several retrievers and fuse via reciprocal-rank fusion; usable as a two-stage retriever. |
 | Item-token LM | `item_token_lm.py` | Generative retrieval | Causal LM over item ids; autoregressively *generates* the next items token-by-token. |
-| LLM reranker | `llm_reranker.py` | Ranking (language) | Cross-encoder (or prompt embedding) scores (history, candidate) pairs; used in `LLMTwoStageRecommender`. |
+| LLM reranker | `llm_reranker.py` | Ranking (language) | Cross-encoder scores (history, candidate) pairs; `LLMTwoStageRecommender`. |
+
+**Scaffolds (Tier 1–3):** see [Extension points](#extension-points-scaffolds-by-tier) below.
 
 ---
 
@@ -273,8 +275,131 @@ Takeaways: two-stage beats retrieval-alone; social adds a further lift as a rank
 
 ---
 
-## Extension points (scaffolds present)
+## Extension points (scaffolds by tier)
 
-- **Graph / LightGCN** (`graph.py`) — propagate over the user–item graph.
-- **Multimodal** (`multimodal.py`) — image embeddings (CLIP) from Yelp photos.
-- **Richer ranker features** — text/image similarity, geo distance, context.
+### Tier 1 — highest ROI for this repo
+| Scaffold | Path | Goal |
+|---|---|---|
+| Review-text enrichment | `data/review_text.py` | Raise cold-item ceiling (aggregate Yelp review snippets) |
+| Extended ranker features | `models/ranker_features.py` | `content_score`, retriever source, activity bucket |
+| Benchmark gaps | `scripts/benchmark.py` | Run `item_token_lm`, `two_stage_llm`, `--mode ab-sasrec` |
+
+### Tier 2 — strong learning value (already stubbed)
+| Scaffold | Path | Goal |
+|---|---|---|
+| LightGCN | `models/graph.py` | Interaction-graph propagation; ranker feature or retriever arm |
+| CLIP / multimodal | `models/multimodal.py` | Image embeddings for cold-item (after review text) |
+
+### Tier 3 — modern / senior-depth
+| Scaffold | Path | Goal |
+|---|---|---|
+| HSTU | `models/hstu.py` | Industrial sequential model; ranker feature like SASRec |
+| Semantic item IDs | `models/semantic_ids.py` | TIGER/LC-Rec compositional tokens for generative rec |
+| Contrastive two-tower | `models/contrastive.py` | Hard negatives / SimGCL-style warm lift |
+| Slate diversity | `eval/slate.py` | MMR / DPP post-rank; relevance–diversity Pareto |
+| Debiased eval | `eval/debias.py` | IPS / SNIPS propensity-weighted metrics |
+
+---
+
+## Senior / Staff MLE — analyses to run (and how to talk about them)
+
+Use this repo's **cross-regime benchmark** as the backbone. Interviewers at senior+
+care less about "we tried X" and more about **attribution, tradeoffs, and honest limits**.
+
+### 1. Regime attribution (you already have the setup)
+**Question:** *Which signal helps which population?*
+
+| Analysis | What to show |
+|---|---|
+| Four-view table | overall / warm / cold-item / cold-user per model |
+| Unified vs components | unified beats any single retriever on blended metric |
+| Per-retriever ablation | drop one arm from MultiRetriever; which slice drops most? |
+| Ranker feature ablation | social off, sasrec off, content_score off |
+
+**Sound bite:** "We don't ask one model to win everywhere — we measure where each signal earns its place."
+
+### 2. Feature / data ablation (Tier 1 priority)
+**Question:** *Is the bottleneck architecture or data?*
+
+| Analysis | What to show |
+|---|---|
+| name+categories vs +review text | cold_item_r@20 before/after `review_text.py` |
+| Candidate pool diagnostics | % of cold-item test targets that reach top-200 candidates |
+| Content score separation | cosine(relevant cold) vs cosine(irrelevant cold) |
+
+**Sound bite:** "Cold-item failed at retrieval, not ranking — item text wasn't discriminative."
+
+### 3. Latency–quality–cost tradeoff
+**Question:** *Would you ship this?*
+
+| Analysis | What to show |
+|---|---|
+| fit+rec time per model | already in `benchmarks.md` |
+| Unified vs SASRec-only on warm | is 3× runtime worth +0.005 warm recall? |
+| LLM reranker cost | cross-encoder calls = users × candidates |
+
+**Sound bite:** "SASRec as ranker feature gives warm lift without a fifth retriever training loop at serving."
+
+### 4. Exposure bias / debiasing (Tier 3 scaffold)
+**Question:** *Are you just learning popularity?*
+
+| Analysis | What to show |
+|---|---|
+| IPS-weighted recall | `eval/debias.py` — down-weight easy popular hits |
+| Popularity baseline gap | raw vs debiased lift for unified on cold-user |
+| Coverage@K vs recall | diversity cost of unified |
+
+**Sound bite:** "Popularity wins cold-user partly by exposure — here's debiased lift."
+
+### 5. Diversity vs relevance (Tier 3 scaffold)
+**Question:** *What does the user actually see?*
+
+| Analysis | What to show |
+|---|---|
+| MMR sweep | λ from 0→1: NDCG vs catalog coverage Pareto curve |
+| Category redundancy | avg same-category count in top-10 |
+
+**Sound bite:** "We can trade 2% NDCG for 2× coverage without touching the ranker."
+
+### 6. Sequential / generative positioning
+**Question:** *Why not one big generative model?*
+
+| Analysis | What to show |
+|---|---|
+| SASRec vs item_token_lm | warm slice; generative decode vs dot-product |
+| LLM reranker vs GBM | same candidates, language vs tabular features |
+| Semantic IDs (future) | cold-item vs flat token LM |
+
+**Sound bite:** "Generative is complementary — we use LM scoring on a small pool, not full-catalog generation."
+
+### 7. Statistical honesty
+**Question:** *How confident are you?*
+
+| Analysis | What to show |
+|---|---|
+| Seed variance | 3 runs of unified; report mean ± std on key slices |
+| Slice size | n cold users (346), n cold items (223) — enough to trust? |
+| Global vs per-user split | why global split matters for cold-user |
+
+**Sound bite:** "Injected tail gives credible cold counts; we don't simulate coldness."
+
+### 8. Production mapping (staff-level)
+**Question:** *How does this become a system?*
+
+Draw the serving diagram:
+```
+MultiRetriever (parallel) → candidate pool → GBM ranker (+ SASRec/social features)
+                         → optional LLM rerank on top-80
+                         → MMR diversity → business rules
+```
+Mention: logging, online A/B, candidate cache, cold-user fallback path (popularity).
+
+### Interview checklist (bring one slide per row)
+1. **Problem** — one dataset, three regimes (warm / cold-item / cold-user)
+2. **Baseline** — popularity + ALS + per-user temporal (why not enough)
+3. **Architecture** — unified MultiRetriever + ranker; generative as optional layer
+4. **Key finding** — collaborative ~0 on cold; unified wins overall + cold-user
+5. **Honest limit** — cold-item = data; review text is the next experiment
+6. **Ablation** — SASRec feature / social / content arm removals
+7. **Cost** — runtime table; ranker-feature vs retriever tradeoff
+8. **Next** — review enrichment → IPS eval → diversity Pareto

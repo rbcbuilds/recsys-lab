@@ -1,4 +1,4 @@
-"""Graph recommendation (LightGCN / Node2Vec)  [SCAFFOLD — Phase 3].
+"""Graph recommendation (LightGCN / Node2Vec)  [SCAFFOLD — Tier 2].
 
 Treat the user-item interactions as a bipartite graph and learn embeddings by
 propagating information along edges. LightGCN is the deployed favorite: it
