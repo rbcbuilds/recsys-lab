@@ -17,7 +17,8 @@ Build the dataset:
 
 Run:
 
-    python scripts/benchmark.py
+    python scripts/benchmark.py                    # core set (default, ~25–45 min)
+    python scripts/benchmark.py --mode full        # all 13 models (~2+ hours)
     python scripts/benchmark.py --mode ab-sasrec   # unified with/without SASRec ranker feature
 
 Cached reruns skip fit+recommend for models already in artifacts/benchmark_cache/.
@@ -139,13 +140,40 @@ def _item_embedding_dict(ds) -> dict:
     return {iid: emb[row] for row, iid in enumerate(item_ids)}
 
 
+# Curated default set — see CORE_MODELS below. Ranked on philly_xreg_fast + enriched
+# text + images (Jul 2026); times are fresh-run seconds on laptop CPU.
+#
+#  rank  model                  time_s  overall  warm   cold_item  cold_user  notes
+#  ----  ---------------------  ------  -------  -----  ---------  ---------  -----
+#   1    popularity               0.1   0.061   0.053   0.000      0.090    baseline
+#   2    item_token_lm           88.0   0.057   0.048   0.000      0.090    generative
+#   3    two_stage_unified     333–1130 0.048–0.062 0.049–0.059 0.000 0.052–0.077  headline
+#   4    image_embedding          0.5   0.047   0.034   0.000      0.090    multimodal
+#   5    sasrec                  99.0   0.030   0.042   0.000      0.000    sequential
+#   6    hstu                   170.0   0.031   0.044   0.000      0.000    core (Tier 3 seq)
+#   7    semantic_id_lm         190.0   0.030   0.011   0.008      0.090    only cold-item lift
+#   8    two_stage               12.0   0.032   0.045   0.000      0.000    unified dominates
+#   9    bpr                      0.8   0.025   0.035   0.000      0.000    weak MF
+#  10    als                      0.7   0.022   0.031   0.000      0.000    weak MF
+#  11    contrastive_two_tower  373.0   0.017   0.025   0.000      0.000    core (Tier 3)
+#  12    two_stage_llm          843.0   0.008   0.011   0.000      0.000    skip (cost)
+#  13    lightgcn                10.0   0.004   0.006   0.000      0.000    core (Tier 2)
+
+# Default benchmark: headline architecture + one model per tier/signal (~25–45 min).
+CORE_MODELS = (
+    "popularity",              # instant baseline; cold-user floor
+    "sasrec",                  # warm sequential reference
+    "hstu",                    # time-aware sequential (Tier 3)
+    "item_token_lm",           # strong overall + cold-user generative
+    "lightgcn",                # Tier 2 graph CF
+    "contrastive_two_tower",   # Tier 3 hard-negative two-tower
+    "semantic_id_lm",          # Tier 3 compositional tokens; cold-item lift
+    "two_stage_unified",       # MultiRetriever → ranker (headline)
+)
+
+# Smoke test (~5 min): baseline + headline only.
 FAST_MODELS = (
     "popularity",
-    "als",
-    "bpr",
-    "sasrec",
-    "lightgcn",
-    "two_stage",
     "two_stage_unified",
 )
 
@@ -181,11 +209,15 @@ def model_configs_for_mode(mode: str) -> dict:
         configs["image_embedding"] = {}
     if mode == "tier3":
         return {k: configs[k] for k in TIER3_MODELS if k in configs}
-    if mode == "fast":
-        keys = list(FAST_MODELS)
-        if "image_embedding" in configs:
-            keys.append("image_embedding")
-        return {k: configs[k] for k in keys if k in configs}
+    if mode in ("core", "fast"):
+        keys = [k for k in (CORE_MODELS if mode == "core" else FAST_MODELS) if k in configs]
+        if "image_embedding" in configs and "image_embedding" not in keys:
+            if mode == "core":
+                insert_at = keys.index("item_token_lm") + 1 if "item_token_lm" in keys else len(keys)
+                keys.insert(insert_at, "image_embedding")
+            else:
+                keys.append("image_embedding")
+        return {k: configs[k] for k in keys}
     return configs
 
 
@@ -235,11 +267,15 @@ def build_models(ds, mode: str = "full"):
     base.update(_tier3_models(ds))
     if mode == "tier3":
         return {k: base[k] for k in TIER3_MODELS if k in base}
-    if mode == "fast":
-        keys = list(FAST_MODELS)
-        if "image_embedding" in base:
-            keys.append("image_embedding")
-        return {k: base[k] for k in keys if k in base}
+    if mode in ("core", "fast"):
+        keys = [k for k in (CORE_MODELS if mode == "core" else FAST_MODELS) if k in base]
+        if "image_embedding" in base and "image_embedding" not in keys:
+            if mode == "core":
+                insert_at = keys.index("item_token_lm") + 1 if "item_token_lm" in keys else len(keys)
+                keys.insert(insert_at, "image_embedding")
+            else:
+                keys.append("image_embedding")
+        return {k: base[k] for k in keys}
     return base
 
 
@@ -473,6 +509,7 @@ cold tail), one global-time split, every model scored on **overall**, **warm**,
 
 ```bash
 python scripts/benchmark.py
+python scripts/benchmark.py --mode full
 python scripts/benchmark.py --mode ab-sasrec
 ```
 
@@ -536,10 +573,11 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
         "--mode",
-        choices=["full", "fast", "tier3", "ab-sasrec"],
-        default="full",
-        help="full = all models; fast = 7 core models; tier3 = hstu + semantic_id_lm "
-        "+ contrastive_two_tower; ab-sasrec = unified with/without SASRec ranker feature.",
+        choices=["core", "full", "fast", "tier3", "ab-sasrec"],
+        default="core",
+        help="core (default) = 9–10 curated models (~25–45 min); full = all 13 (~2+ h); "
+        "fast = popularity + unified smoke (~5 min); tier3 = hstu + semantic_id_lm "
+        "+ contrastive_two_tower; ab-sasrec = unified SASRec ranker A/B.",
     )
     ap.add_argument("--cutoff-quantile", type=float, default=0.9)
     ap.add_argument("--k", type=int, default=max(settings.eval_ks))
