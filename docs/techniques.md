@@ -209,25 +209,27 @@ train = interactions with t <= T        test = interactions with t > T
 cold_items = test items not in train    cold_users = test users not in train
 ```
 
-Because the injected tail is first-seen after `T`, it has **zero** training history — genuinely cold, no carve-out. Unlike a per-user split (which leaves every user with train history and so can never produce a cold *user*), one global cutoff makes both cold items and cold users arise naturally. Run `python scripts/benchmark.py` on the cross-regime slice.
+Because the injected tail is first-seen after `T`, it has **zero** training history — genuinely cold, no carve-out. Unlike a per-user split (which leaves every user with train history and so can never produce a cold *user*), one global cutoff makes both cold items and cold users arise naturally. Run `python scripts/benchmark.py` (default **core** mode) on the enriched fast cross-regime slice in `data/processed/`.
 
-**Results** (cross-regime Philadelphia, recall@20 — `python scripts/benchmark.py`):
+**Results** (cross-regime Philadelphia fast + enriched text + images, recall@20 — `python scripts/benchmark.py`, Jul 2026):
 
 | model | overall | warm | cold-item | cold-user |
 |---|---|---|---|---|
-| popularity | 0.046 | 0.044 | 0.000 | 0.069 |
-| als / bpr | 0.017 | 0.027 | 0.000 | 0.000 |
-| sasrec | 0.037 | **0.060** | 0.000 | 0.000 |
-| two_stage | 0.023 | 0.039 | 0.000 | 0.000 |
-| item_token_lm | — | — | — | — |
-| two_stage_llm | — | — | — | — |
-| **two_stage_unified** | **0.052** | 0.052 | 0.000 | **0.087** |
+| **two_stage_unified** | **0.061** | **0.067** | 0.000 | 0.054 |
+| popularity | 0.061 | 0.053 | 0.000 | **0.090** |
+| item_token_lm | 0.057 | 0.048 | 0.000 | **0.090** |
+| image_embedding | 0.047 | 0.034 | 0.000 | **0.090** |
+| hstu | 0.031 | 0.044 | 0.000 | 0.000 |
+| sasrec | 0.030 | 0.042 | 0.000 | 0.000 |
+| semantic_id_lm | 0.030 | 0.011 | **0.008** | **0.090** |
+| contrastive_two_tower | 0.017 | 0.024 | 0.000 | 0.000 |
+| lightgcn | 0.004 | 0.006 | 0.000 | 0.000 |
 
-*`item_token_lm` and `two_stage_llm` are in `benchmark.py` full mode; re-run to fill rows.*
+*`als`, `bpr`, `two_stage`, and `two_stage_llm` are in `--mode full`; see [`docs/benchmarks.md`](benchmarks.md).*
 
-The unified two-stage (`MultiRetriever[two-tower + content_based + social + popularity] → ranker`, see `scripts/benchmark.py::build_unified_two_stage`) wins on **overall and cold-user**; SASRec is strongest on warm among single-signal models.
+The unified two-stage (`MultiRetriever[two-tower + content_based + social + popularity] → ranker`, see `scripts/benchmark.py::build_unified_two_stage`) wins on **overall and warm**; popularity and `item_token_lm` still lead **cold-user**; **`semantic_id_lm`** is the only model with non-zero **cold-item** recall.
 
-**\*The cold-item finding (a real one, unchanged by the natural slice).** Injecting *real* cold items makes the slice statistically credible; it does **not** raise the score. Cold-item recall stays low because it's the *data*, not the ranker: Yelp item text is only `name + categories` (~75 chars, e.g. `"Tuna Bar. Sushi Bars, Restaurants, Japanese"`), which clusters items by cuisine but can't pinpoint the specific next business. Content-cosine barely separates relevant cold items (0.667 vs 0.625 warm), so few cold targets even reach the candidate pool. Attempts to force it (content-score ranker feature, cold-feature dropout, round-robin fusion) didn't help and slightly hurt the other slices — you can't rank cold items the retriever never surfaces, and you can't teach a ranker cold behavior when training has zero cold positives. **Text-based cold-start works only when the text is discriminative** (product descriptions, review text, news bodies), not 3-word category lists. *Extension point:* aggregate real Yelp **review text** per business into the item text to raise the ceiling.
+**\*The cold-item finding (still mostly true after enrichment).** Injecting *real* cold items makes the slice statistically credible; enrichment raises the ceiling slightly but not dramatically. Cold-item recall stays near-zero for most models because Yelp item text — even with aggregated review snippets — still clusters items by cuisine and vibe more than by the specific next business. Content-cosine barely separates relevant cold items, so few cold targets reach the candidate pool. Attempts to force it (content-score ranker feature, cold-feature dropout, round-robin fusion) didn't help and slightly hurt the other slices — you can't rank cold items the retriever never surfaces, and you can't teach a ranker cold behavior when training has zero cold positives. **`semantic_id_lm` (0.008 cold-item recall)** shows compositional item codes can pick up a small signal once text is richer, but the headline remains: **text-based cold-start works only when the text is discriminative enough** to surface the right candidates, not just describe the category.
 
 ---
 
@@ -282,7 +284,7 @@ Takeaways: two-stage beats retrieval-alone; social adds a further lift as a rank
 |---|---|---|
 | Review-text enrichment | `data/review_text.py`, `scripts/enrich_item_text.py` | **Done** — stream reviews → enriched `items.text` |
 | Extended ranker features | `models/ranker_features.py` | **Done** — `content_score`, retriever source flags, activity bucket, item age |
-| Benchmark | `scripts/benchmark.py` | **Done** — `--mode fast`, cache, unified default `use_sasrec=False` |
+| Benchmark | `scripts/benchmark.py` | **Done** — default `--mode core` (9 models), `--mode full` / `fast`, cache, `--ips`, `--diversify`; unified default `use_sasrec=False` |
 
 ### Tier 2 — strong learning value (implemented)
 | Module | Path | Status |

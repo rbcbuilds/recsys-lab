@@ -6,6 +6,7 @@ cold tail), one global-time split, every model scored on **overall**, **warm**,
 
 ```bash
 python scripts/benchmark.py
+python scripts/benchmark.py --mode full
 python scripts/benchmark.py --mode ab-sasrec
 ```
 
@@ -17,24 +18,24 @@ to retrain everything.
 One model, one training set, four views. Cold entities arise naturally under a
 single wall-clock cutoff — not simulated. See `docs/techniques.md`.
 
-- **Dataset:** Dataset(users=1,507, items=3,401, interactions=20,258, density=0.3953%, social_edges=20,092, has_images=False)
+- **Dataset:** Dataset(users=1,507, items=3,401, interactions=20,258, density=0.3953%, social_edges=20,092, has_images=True)
 - **Split:** global-time split at q=0.9
 - **Cold sets:** 51 cold items, 78 cold users
 - **Slice users:** warm=228, cold-item=63, cold-user=78
 - **Run date:** 2026-07-13
-- **Total run time:** 1435s (single-thread BLAS, laptop CPU)
+- **Total run time:** 7101s (single-thread BLAS, laptop CPU)
 
 | model | overall_r@20 | warm_r@20 | cold_item_r@20 | cold_user_r@20 | ndcg@10 | fit+rec (s) |
 |---|---|---|---|---|---|---|
-| popularity | 0.0607 | 0.0532 | 0.0000 | 0.0899 | 0.0263 | 0.2 |
-| als | 0.0221 | 0.0314 | 0.0000 | 0.0000 | 0.0116 | 0.9 |
-| bpr | 0.0247 | 0.0353 | 0.0000 | 0.0000 | 0.0154 | 1.2 |
-| sasrec | 0.0304 | 0.0423 | 0.0000 | 0.0000 | 0.0120 | 109.0 |
-| item_token_lm | 0.0566 | 0.0476 | 0.0000 | 0.0899 | 0.0245 | 98.2 |
-| two_stage | 0.0315 | 0.0447 | 0.0000 | 0.0000 | 0.0166 | 12.6 |
-| two_stage_llm | 0.0076 | 0.0106 | 0.0000 | 0.0000 | 0.0067 | 880.4 |
-| two_stage_unified | 0.0512 | 0.0525 | 0.0000 | 0.0541 | 0.0255 | 332.8 |
-
+| popularity | 0.0607 | 0.0532 | 0.0000 | 0.0899 | 0.0263 | 0.3 |
+| sasrec | 0.0304 | 0.0423 | 0.0000 | 0.0000 | 0.0120 | 101.8 |
+| hstu | 0.0306 | 0.0437 | 0.0000 | 0.0000 | 0.0159 | 75.6 |
+| item_token_lm | 0.0566 | 0.0476 | 0.0000 | 0.0899 | 0.0245 | 82.1 |
+| image_embedding | 0.0471 | 0.0343 | 0.0000 | 0.0899 | 0.0214 | 0.5 |
+| lightgcn | 0.0042 | 0.0058 | 0.0000 | 0.0000 | 0.0022 | 4.8 |
+| contrastive_two_tower | 0.0174 | 0.0245 | 0.0000 | 0.0000 | 0.0101 | 147.4 |
+| semantic_id_lm | 0.0302 | 0.0107 | 0.0079 | 0.0899 | 0.0114 | 155.2 |
+| two_stage_unified | 0.0612 | 0.0669 | 0.0000 | 0.0542 | 0.0280 | 6533.3 |
 ## SASRec ranker feature A/B (unified pipeline)
 
 One model, one training set, four views. Cold entities arise naturally under a
@@ -53,7 +54,6 @@ single wall-clock cutoff — not simulated. See `docs/techniques.md`.
 |---|---|---|---|---|---|---|
 | two_stage_unified | 0.0617 | 0.0591 | 0.0000 | 0.0770 | 0.0250 | 121.4 |
 | two_stage_unified_sasrec | 0.0512 | 0.0525 | 0.0000 | 0.0541 | 0.0255 | 343.3 |
-
 ## How to read this
 
 - **overall_r@20** — recall across all test positives (the blended score).
@@ -62,11 +62,15 @@ single wall-clock cutoff — not simulated. See `docs/techniques.md`.
 - **cold_user_r@20** — user never seen in train (social / popularity signal).
 - **ndcg@10** — ranking quality on the full test set.
 
-Collaborative models (als, bpr, sasrec, two_stage) should be strong on warm and
-near-zero on both cold slices. Popularity lifts cold-user. The unified two-stage
+Collaborative models (als, bpr, sasrec, lightgcn, two_stage) should be strong on warm and
+near-zero on both cold slices. Popularity lifts cold-user. Image embeddings help
+cold-item when `item_image_vectors.npy` is present. The unified two-stage
 (`MultiRetriever` → ranker) is the architecture meant to stay non-zero across all
 three regimes. **Generative / language models:** `item_token_lm` autoregressively
 generates item tokens; `two_stage_llm` re-ranks two-tower candidates with a
-cross-encoder (candidate pool=80). Cold-item recall stays
+cross-encoder (candidate pool=80). **Tier 3:** `hstu` adds time-aware sequential
+signal; `semantic_id_lm` uses compositional item codes; `contrastive_two_tower`
+trains with popularity hard negatives. Pass ``--diversify`` for MMR post-ranking
+and ``--ips`` for propensity-weighted recall. Cold-item recall stays
 low on Yelp because item text is only name + categories — see `docs/techniques.md`.
 

@@ -10,21 +10,27 @@ skeleton.
 
 One dataset, one train set, four test views: **overall**, **warm**, **cold-item**,
 **cold-user**. Cold entities arise naturally from a global-time cutoff — not
-simulated carve-outs.
+simulated carve-outs. Core benchmark (`python scripts/benchmark.py`, Jul 2026).
 
 | model | overall@20 | warm@20 | cold-item@20 | cold-user@20 |
 |---|---|---|---|---|
-| popularity | 0.046 | 0.044 | 0.000 | 0.069 |
-| sasrec | 0.037 | **0.060** | 0.000 | 0.000 |
-| two_stage | 0.023 | 0.039 | 0.000 | 0.000 |
-| **two_stage_unified** | **0.053** | 0.052 | 0.000 | **0.087** |
+| **two_stage_unified** | **0.061** | **0.067** | 0.000 | 0.054 |
+| popularity | 0.061 | 0.053 | 0.000 | **0.090** |
+| item_token_lm | 0.057 | 0.048 | 0.000 | **0.090** |
+| image_embedding | 0.047 | 0.034 | 0.000 | **0.090** |
+| hstu | 0.031 | 0.044 | 0.000 | 0.000 |
+| sasrec | 0.030 | 0.042 | 0.000 | 0.000 |
+| semantic_id_lm | 0.030 | 0.011 | **0.008** | **0.090** |
+| contrastive_two_tower | 0.017 | 0.024 | 0.000 | 0.000 |
+| lightgcn | 0.004 | 0.006 | 0.000 | 0.000 |
 
-**Dataset:** 2,500 users · 4,200 items · 185k interactions · 223 cold items · 360 cold users
+**Dataset:** 1,507 users · 3,401 items · 20k interactions · 51 cold items · 78 cold users · enriched review text + CLIP images
 
 **Headline finding:** collaborative models score ~0 on cold slices; the unified
-`MultiRetriever[two-tower + content + social + popularity] → ranker` stays strong
-on overall and cold-user. Cold-item recall stays low — Yelp item text is only
-name + categories.
+`MultiRetriever[two-tower + content + social + popularity] → ranker` edges overall/warm.
+Popularity and generative models (`item_token_lm`) still win cold-user. Cold-item
+recall stays near-zero except **`semantic_id_lm` (0.008)** — review enrichment helps
+slightly but the ceiling is still low.
 
 Full table + reproduction: [`docs/benchmarks.md`](docs/benchmarks.md) ·
 `python scripts/benchmark.py`
@@ -47,9 +53,11 @@ request → retrieval (multi-source) → re-ranker → top-K
 
 ## Dataset
 
-**Main slice:** cross-regime Philadelphia (`scripts/make_crossregime.py`) — dense
-core (≥10 interactions per user/item) plus a real low-activity tail injected from
-raw Yelp so cold users and cold items appear naturally under a global-time split.
+**Main slice:** cross-regime Philadelphia fast subset (`scripts/make_crossregime.py`
++ `scripts/shrink_subset.py`) with review-text enrichment and optional CLIP image
+vectors — dense core (≥10 interactions per user/item) plus a real low-activity tail
+injected from raw Yelp so cold users and cold items appear naturally under a
+global-time split.
 
 | Signal | Yelp source |
 |---|---|
@@ -64,16 +72,26 @@ Real Yelp drops in via the same loader.
 ```bash
 # Build cross-regime slice from raw Yelp JSON
 python scripts/make_crossregime.py
-cp data/processed_philly_xreg/*.parquet data/processed/
 
-# Run headline benchmark (8 models, ~10 min on current slice)
-python scripts/benchmark.py
+# Shrink for laptop iteration (headline benchmark dataset)
+python scripts/shrink_subset.py --cross-regime --max-per-user 10 --max-warm-users 1000 --user-select social_seq
+python scripts/enrich_item_text.py
+python scripts/build_image_vectors.py   # optional: Yelp photos → CLIP vectors
+cp data/processed_philly_xreg_fast/*.parquet data/processed/
+cp data/processed_philly_xreg_fast/item_image_vectors.npy data/processed/ 2>/dev/null || true
+
+# Run core benchmark (9 models, default; ~2h on laptop CPU — unified dominates)
+python scripts/benchmark.py --ips
+
+# All 13 models (~2+ hours beyond unified) or smoke test (~5 min)
+python scripts/benchmark.py --mode full
+python scripts/benchmark.py --mode fast
 
 # SASRec ranker-feature A/B on unified pipeline only
 python scripts/benchmark.py --mode ab-sasrec
 ```
 
-To shrink for faster iteration (cap=10, top-1000 warm by social+sequence, cold users pinned):
+To rebuild only the fast subset without re-running the full cross-regime build:
 
 ```bash
 python scripts/shrink_subset.py --cross-regime --max-per-user 10 --max-warm-users 1000 --user-select social_seq
@@ -84,7 +102,7 @@ Enrich item text from Yelp reviews (raises cold-item ceiling), then re-benchmark
 
 ```bash
 python scripts/enrich_item_text.py
-python scripts/benchmark.py --mode fast --force
+python scripts/benchmark.py --force --ips
 ```
 
 ## Quickstart
@@ -95,7 +113,8 @@ pip install -r requirements.txt
 pip install -r requirements-extra.txt   # torch, sentence-transformers (neural models)
 
 python scripts/demo.py                  # quick smoke test
-python scripts/benchmark.py             # full cross-regime comparison
+python scripts/benchmark.py             # core cross-regime comparison (default)
+python scripts/benchmark.py --mode full # all 13 models
 ```
 
 Real Yelp: see [`data/README.md`](data/README.md).
