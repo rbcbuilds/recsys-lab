@@ -284,11 +284,11 @@ Takeaways: two-stage beats retrieval-alone; social adds a further lift as a rank
 | Extended ranker features | `models/ranker_features.py` | **Done** — `content_score`, retriever source flags, activity bucket, item age |
 | Benchmark | `scripts/benchmark.py` | **Done** — `--mode fast`, cache, unified default `use_sasrec=False` |
 
-### Tier 2 — strong learning value (already stubbed)
-| Scaffold | Path | Goal |
+### Tier 2 — strong learning value (implemented)
+| Module | Path | Status |
 |---|---|---|
-| LightGCN | `models/graph.py` | Interaction-graph propagation; ranker feature or retriever arm |
-| CLIP / multimodal | `models/multimodal.py` | Image embeddings for cold-item (after review text) |
+| LightGCN | `models/graph.py` | **Done** — BPR training, graph propagation, benchmark + optional ranker feature (`use_lightgcn`) |
+| CLIP / multimodal | `models/multimodal.py`, `scripts/build_image_vectors.py` | **Done** — `ImageEmbeddingRecommender`; auto-included when `item_image_vectors.npy` exists |
 
 ### Tier 3 — modern / senior-depth
 | Scaffold | Path | Goal |

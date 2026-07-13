@@ -118,8 +118,8 @@ Details: [`docs/techniques.md`](docs/techniques.md).
 - [x] Sequential: SASRec (standalone + ranker feature)
 - [x] Content: content-based retrieval, content two-tower
 - [x] Generative: item-token LM, LLM cross-encoder reranker
-- [ ] Graph (LightGCN / Node2Vec) — scaffold
-- [ ] Multimodal (image embeddings) — scaffold
+- [x] Graph: LightGCN (BPR + neighborhood aggregation)
+- [x] Multimodal: CLIP image embeddings (`scripts/build_image_vectors.py`)
 
 ## Project structure
 
@@ -128,6 +128,7 @@ recsys-lab/
 ├── scripts/
 │   ├── make_crossregime.py   # build main dataset (dense + cold tail)
 │   ├── benchmark.py          # headline cross-regime comparison
+│   ├── build_image_vectors.py  # CLIP vectors from Yelp photos (Tier 2)
 │   └── demo.py               # quick smoke test
 ├── src/recsys/
 │   ├── data/                 # loaders, subsetter, synthetic generator

@@ -15,12 +15,10 @@ Working now:
     MultiRetriever                - union + reciprocal-rank-fuse several retrievers
     ItemTokenLMRecommender        - generative causal LM over item-token sequences
     LLMReranker / LLMTwoStage     - language-model scoring re-ranks retrieved candidates
+    LightGCNRecommender           - interaction-graph propagation (BPR + LightGCN)
+    ImageEmbeddingRecommender     - CLIP image embeddings for cold-item retrieval
 
-Scaffolds (Tier 1–3 — documented interfaces, raise NotImplementedError):
-    review_text.build_enriched_item_text   - aggregate Yelp reviews into item text
-    ranker_features.ExtendedRankerFeatures - content_score, retriever source, activity
-    graph.LightGCNRecommender              - interaction-graph propagation (Tier 2)
-    multimodal.ImageEmbeddingRecommender   - CLIP image embeddings (Tier 2)
+Scaffolds (Tier 3 — documented interfaces, raise NotImplementedError):
     hstu.HSTURecommender                   - industrial sequential model (Tier 3)
     semantic_ids.SemanticIDRecommender     - TIGER-style semantic item tokens (Tier 3)
     contrastive.ContrastiveTwoTowerRecommender - hard-negative two-tower (Tier 3)

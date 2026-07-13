@@ -54,7 +54,9 @@ from src.recsys.models import (
     ALSRecommender,
     BPRRecommender,
     ContentBasedRecommender,
+    ImageEmbeddingRecommender,
     ItemTokenLMRecommender,
+    LightGCNRecommender,
     LLMTwoStageRecommender,
     MultiRetriever,
     PopularityRecommender,
@@ -76,21 +78,31 @@ UNIFIED_KWARGS = dict(
     use_extended_features=True,
     sasrec_kwargs=SASREC_KWARGS,
 )
+LIGHTGCN_KWARGS = dict(dim=64, n_layers=2, epochs=10)
 TWO_TOWER_KWARGS = dict(dim=64, epochs=10)
+
+
+def _unified_retrievers(ds) -> list:
+    retrievers = [
+        TwoTowerRecommender(**TWO_TOWER_KWARGS),
+        ContentBasedRecommender(items=ds.items),
+        SocialRecommender(social=ds.social),
+        PopularityRecommender(),
+    ]
+    if ds.item_image_vectors is not None:
+        retrievers.insert(
+            2,
+            ImageEmbeddingRecommender(
+                items=ds.items, item_image_vectors=ds.item_image_vectors
+            ),
+        )
+    return retrievers
 
 
 def build_unified_two_stage(ds, use_sasrec: bool = False) -> TwoStageRecommender:
     """Multi-retriever pipeline meant to span warm, cold-item, and cold-user."""
-    retriever = MultiRetriever(
-        [
-            TwoTowerRecommender(**TWO_TOWER_KWARGS),
-            ContentBasedRecommender(items=ds.items),
-            SocialRecommender(social=ds.social),
-            PopularityRecommender(),
-        ]
-    )
     return TwoStageRecommender(
-        retriever,
+        MultiRetriever(_unified_retrievers(ds)),
         candidate_n=UNIFIED_KWARGS["candidate_n"],
         use_social=UNIFIED_KWARGS["use_social"],
         social=ds.social,
@@ -98,6 +110,21 @@ def build_unified_two_stage(ds, use_sasrec: bool = False) -> TwoStageRecommender
         sasrec_kwargs=UNIFIED_KWARGS["sasrec_kwargs"] if use_sasrec else None,
         use_extended_features=UNIFIED_KWARGS["use_extended_features"],
     )
+
+
+FAST_MODELS = (
+    "popularity",
+    "als",
+    "bpr",
+    "sasrec",
+    "lightgcn",
+    "two_stage",
+    "two_stage_unified",
+)
+
+
+def _has_image_vectors() -> bool:
+    return (settings.paths["processed"] / "item_image_vectors.npy").exists()
 
 
 def model_configs_for_mode(mode: str) -> dict:
@@ -111,6 +138,7 @@ def model_configs_for_mode(mode: str) -> dict:
         "als": {"factors": 64, "iterations": 15},
         "bpr": {"factors": 64, "iterations": 80},
         "sasrec": SASREC_KWARGS,
+        "lightgcn": LIGHTGCN_KWARGS,
         "item_token_lm": ITEM_TOKEN_LM_KWARGS,
         "two_stage": {"candidate_n": 200, "use_social": False, **TWO_TOWER_KWARGS},
         "two_stage_llm": {
@@ -119,19 +147,23 @@ def model_configs_for_mode(mode: str) -> dict:
         },
         "two_stage_unified": {"use_sasrec": False, **UNIFIED_KWARGS},
     }
+    if _has_image_vectors():
+        configs["image_embedding"] = {}
     if mode == "fast":
-        return {k: configs[k] for k in FAST_MODELS}
+        keys = list(FAST_MODELS)
+        if "image_embedding" in configs:
+            keys.append("image_embedding")
+        return {k: configs[k] for k in keys if k in configs}
     return configs
 
 
-FAST_MODELS = (
-    "popularity",
-    "als",
-    "bpr",
-    "sasrec",
-    "two_stage",
-    "two_stage_unified",
-)
+def _tier2_models(ds) -> dict:
+    models = {"lightgcn": LightGCNRecommender(**LIGHTGCN_KWARGS)}
+    if ds.item_image_vectors is not None:
+        models["image_embedding"] = ImageEmbeddingRecommender(
+            items=ds.items, item_image_vectors=ds.item_image_vectors
+        )
+    return models
 
 
 def build_models(ds, mode: str = "full"):
@@ -159,8 +191,12 @@ def build_models(ds, mode: str = "full"):
         ),
         "two_stage_unified": build_unified_two_stage(ds, use_sasrec=False),
     }
+    base.update(_tier2_models(ds))
     if mode == "fast":
-        return {k: base[k] for k in FAST_MODELS}
+        keys = list(FAST_MODELS)
+        if "image_embedding" in base:
+            keys.append("image_embedding")
+        return {k: base[k] for k in keys if k in base}
     return base
 
 
@@ -355,8 +391,9 @@ HOW_TO_READ = """## How to read this
 - **cold_user_r@20** — user never seen in train (social / popularity signal).
 - **ndcg@10** — ranking quality on the full test set.
 
-Collaborative models (als, bpr, sasrec, two_stage) should be strong on warm and
-near-zero on both cold slices. Popularity lifts cold-user. The unified two-stage
+Collaborative models (als, bpr, sasrec, lightgcn, two_stage) should be strong on warm and
+near-zero on both cold slices. Popularity lifts cold-user. Image embeddings help
+cold-item when `item_image_vectors.npy` is present. The unified two-stage
 (`MultiRetriever` → ranker) is the architecture meant to stay non-zero across all
 three regimes. **Generative / language models:** `item_token_lm` autoregressively
 generates item tokens; `two_stage_llm` re-ranks two-tower candidates with a
@@ -437,7 +474,8 @@ def main() -> None:
         "--mode",
         choices=["full", "fast", "ab-sasrec"],
         default="full",
-        help="full = 8 models; fast = 6 models (skip LLM + item_token_lm); "
+        help="full = all models (+ image_embedding when vectors exist); "
+        "fast = 7 core models (skip LLM + item_token_lm); "
         "ab-sasrec = unified with/without SASRec ranker feature.",
     )
     ap.add_argument("--cutoff-quantile", type=float, default=0.9)

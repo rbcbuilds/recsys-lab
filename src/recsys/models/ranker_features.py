@@ -15,6 +15,7 @@ SOURCE_NAME_TO_FEATURE = {
     "content_based": "retriever_source_content",
     "social": "retriever_source_social",
     "popularity": "retriever_source_popularity",
+    "image_embedding": "retriever_source_image",
 }
 
 
@@ -23,10 +24,12 @@ class ExtendedRankerFeatures:
 
     FEATURE_NAMES = (
         "content_score",
+        "image_score",
         "retriever_source_two_tower",
         "retriever_source_content",
         "retriever_source_social",
         "retriever_source_popularity",
+        "retriever_source_image",
         "user_activity_bucket",
         "item_age_days",
     )
@@ -59,10 +62,12 @@ class ExtendedRankerFeatures:
         candidates: Dict[str, List[str]],
         retrieval_sources: Optional[Dict[str, Dict[str, Dict[str, float]]]] = None,
         content_scores: Optional[Dict[str, Dict[str, float]]] = None,
+        image_scores: Optional[Dict[str, Dict[str, float]]] = None,
     ) -> Dict[str, Dict[str, Dict[str, float]]]:
         """Per-user, per-item feature values for ranker training/inference."""
         retrieval_sources = retrieval_sources or {}
         content_scores = content_scores or {}
+        image_scores = image_scores or {}
         out: Dict[str, Dict[str, Dict[str, float]]] = {}
 
         for user_id, items in candidates.items():
@@ -70,15 +75,18 @@ class ExtendedRankerFeatures:
             user_feats: Dict[str, Dict[str, float]] = {}
             src_map = retrieval_sources.get(u, {})
             cscores = content_scores.get(u, {})
+            iscores = image_scores.get(u, {})
             for item_id in items:
                 it = str(item_id)
                 src = src_map.get(it, {})
                 row = {
                     "content_score": float(cscores.get(it, 0.0)),
+                    "image_score": float(iscores.get(it, 0.0)),
                     "retriever_source_two_tower": float(src.get("two_tower", 0.0)),
                     "retriever_source_content": float(src.get("content_based", 0.0)),
                     "retriever_source_social": float(src.get("social", 0.0)),
                     "retriever_source_popularity": float(src.get("popularity", 0.0)),
+                    "retriever_source_image": float(src.get("image_embedding", 0.0)),
                     "user_activity_bucket": self._user_bucket.get(u, 0.0),
                     "item_age_days": self._item_age_days.get(it, 365.0),
                 }
@@ -87,11 +95,19 @@ class ExtendedRankerFeatures:
         return out
 
     @staticmethod
-    def content_retriever_from_multi(retriever: Recommender) -> Optional[Recommender]:
-        """Return the content arm inside a ``MultiRetriever``, if present."""
+    def child_retriever_from_multi(retriever: Recommender, name: str) -> Optional[Recommender]:
+        """Return a named child inside a ``MultiRetriever``, if present."""
         if getattr(retriever, "name", "") != "multi_retriever":
             return None
         for child in getattr(retriever, "retrievers", []):
-            if getattr(child, "name", "") == "content_based":
+            if getattr(child, "name", "") == name:
                 return child
         return None
+
+    @staticmethod
+    def content_retriever_from_multi(retriever: Recommender) -> Optional[Recommender]:
+        return ExtendedRankerFeatures.child_retriever_from_multi(retriever, "content_based")
+
+    @staticmethod
+    def image_retriever_from_multi(retriever: Recommender) -> Optional[Recommender]:
+        return ExtendedRankerFeatures.child_retriever_from_multi(retriever, "image_embedding")

@@ -27,11 +27,12 @@ import pandas as pd
 from ..config import settings
 from ..eval.split import temporal_split
 from .base import Recommender
+from .graph import LightGCNRecommender
+from .multi_retriever import MultiRetriever
 from .ranker import LightGBMRanker
 from .ranker_features import ExtendedRankerFeatures
 from .sasrec import SASRecRecommender
 from .social import SocialRecommender
-from .multi_retriever import MultiRetriever
 
 
 class TwoStageRecommender(Recommender):
@@ -48,6 +49,8 @@ class TwoStageRecommender(Recommender):
         social_kwargs: Optional[dict] = None,
         use_sasrec: bool = False,
         sasrec_kwargs: Optional[dict] = None,
+        use_lightgcn: bool = False,
+        lightgcn_kwargs: Optional[dict] = None,
         use_extended_features: bool = True,
         verbose: bool = False,
     ):
@@ -83,11 +86,14 @@ class TwoStageRecommender(Recommender):
         self.social_kwargs = social_kwargs or {}
         self.use_sasrec = use_sasrec
         self.sasrec_kwargs = sasrec_kwargs or {}
+        self.use_lightgcn = use_lightgcn
+        self.lightgcn_kwargs = lightgcn_kwargs or {}
         self.use_extended_features = use_extended_features
         self.verbose = verbose
         self.ranker = LightGBMRanker(verbose=verbose, **self.ranker_kwargs)
         self._social_model: Optional[SocialRecommender] = None
         self._sasrec_model: Optional[SASRecRecommender] = None
+        self._lightgcn_model: Optional[LightGCNRecommender] = None
         self._train: Optional[pd.DataFrame] = None
 
         if self.use_social and self.social is None:
@@ -119,6 +125,9 @@ class TwoStageRecommender(Recommender):
         if self.use_sasrec:
             self._sasrec_model = SASRecRecommender(**self.sasrec_kwargs)
             self._sasrec_model.fit(ret_train)
+        if self.use_lightgcn:
+            self._lightgcn_model = LightGCNRecommender(**self.lightgcn_kwargs)
+            self._lightgcn_model.fit(ret_train)
 
         label_users = list(rank_label_positives.keys())
         candidates, provenance = self._retrieve_candidates(
@@ -128,10 +137,13 @@ class TwoStageRecommender(Recommender):
         train_social_scores = None
         train_sasrec_scores = None
         train_extended = None
+        train_lightgcn_scores = None
         if self.use_social:
             train_social_scores = self._social_model.score_candidates(candidates)
         if self.use_sasrec:
             train_sasrec_scores = self._sasrec_model.score_candidates(candidates)
+        if self.use_lightgcn:
+            train_lightgcn_scores = self._lightgcn_model.score_candidates(candidates)
         if self.use_extended_features:
             train_extended = self._build_extended_features(
                 ret_train, candidates, provenance
@@ -145,6 +157,7 @@ class TwoStageRecommender(Recommender):
             print(
                 f"  training ranker (use_social={self.use_social}, "
                 f"use_sasrec={self.use_sasrec}, "
+                f"use_lightgcn={self.use_lightgcn}, "
                 f"use_extended={self.use_extended_features})..."
             )
         # Features from full train aggregates (user/item stats); labels from holdout.
@@ -155,6 +168,7 @@ class TwoStageRecommender(Recommender):
             labels=labels,
             social_scores=train_social_scores,
             sasrec_scores=train_sasrec_scores,
+            lightgcn_scores=train_lightgcn_scores,
             extended_features=train_extended,
         )
 
@@ -166,6 +180,8 @@ class TwoStageRecommender(Recommender):
             self._social_model.fit(train)
         if self.use_sasrec:
             self._sasrec_model.fit(train)
+        if self.use_lightgcn:
+            self._lightgcn_model.fit(train)
         return self
 
     def recommend(
@@ -186,6 +202,11 @@ class TwoStageRecommender(Recommender):
         sasrec_scores = (
             self._sasrec_model.score_candidates(candidates) if self.use_sasrec else None
         )
+        lightgcn_scores = (
+            self._lightgcn_model.score_candidates(candidates)
+            if self.use_lightgcn
+            else None
+        )
         extended_features = (
             self._build_extended_features(self._train, candidates, provenance)
             if self.use_extended_features
@@ -197,6 +218,7 @@ class TwoStageRecommender(Recommender):
             k=k,
             social_scores=social_scores,
             sasrec_scores=sasrec_scores,
+            lightgcn_scores=lightgcn_scores,
             extended_features=extended_features,
         )
 
@@ -217,13 +239,18 @@ class TwoStageRecommender(Recommender):
     ) -> Dict[str, Dict[str, Dict[str, float]]]:
         builder = ExtendedRankerFeatures(train)
         content = ExtendedRankerFeatures.content_retriever_from_multi(self.retriever)
+        image = ExtendedRankerFeatures.image_retriever_from_multi(self.retriever)
         content_scores = (
             content.score_candidates(candidates) if content is not None else None
+        )
+        image_scores = (
+            image.score_candidates(candidates) if image is not None else None
         )
         return builder.build(
             candidates,
             retrieval_sources=provenance,
             content_scores=content_scores,
+            image_scores=image_scores,
         )
 
     # ------------------------------------------------------------- helpers

@@ -23,7 +23,22 @@ data/raw/
 ```
 
 4. Photos (for the multimodal module) are a **separate** download on the same
-   page (`yelp_photos.tar`). Extract to `data/raw/photos/` if you want images.
+   page (`yelp_photos.tar`). You only need metadata + images for businesses in
+   your processed slice — not the full ~7GB extract:
+
+```bash
+# metadata only (~25MB)
+mkdir -p data/raw/photos
+tar -xf ~/Downloads/Yelp\ Photos/yelp_photos.tar -C data/raw/photos photos.json
+
+# selective image extract for items in data/processed/items.parquet
+python scripts/extract_yelp_photos.py   # writes photos/*.jpg for slice businesses only
+
+# CLIP vectors → data/processed/item_image_vectors.npy
+python scripts/build_image_vectors.py
+```
+
+Or extract everything to `data/raw/photos/` if you have disk space.
 
 5. Carve a small, dense slice so iteration is fast:
 
