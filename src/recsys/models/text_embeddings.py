@@ -186,6 +186,28 @@ class ContentBasedRecommender(IndexedRecommender):
             out[user_id] = self._top_k_from_scores(user_id, scores.copy(), k, exclude_seen)
         return out
 
+    def score_candidates(
+        self, candidates: Dict[str, List[str]]
+    ) -> Dict[str, Dict[str, float]]:
+        """Cosine similarity scores for a candidate list per user."""
+        if self._item_emb is None:
+            raise RuntimeError("Call fit() before score_candidates().")
+        out: Dict[str, Dict[str, float]] = {}
+        for user_id, items in candidates.items():
+            uvec = self._user_emb.get(user_id)
+            if uvec is None:
+                out[user_id] = {str(it): 0.0 for it in items}
+                continue
+            scores: Dict[str, float] = {}
+            for item_id in items:
+                row = self._item_id_to_row.get(str(item_id))
+                if row is None:
+                    scores[str(item_id)] = 0.0
+                else:
+                    scores[str(item_id)] = float(self._item_emb[row] @ uvec)
+            out[user_id] = scores
+        return out
+
 
 class ContentTwoTowerRecommender(TwoTowerRecommender):
     """Two-tower retrieval with text features in the item tower.

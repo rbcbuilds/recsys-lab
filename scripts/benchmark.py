@@ -27,6 +27,7 @@ Use --force to retrain everything.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import sys
@@ -69,7 +70,12 @@ SASREC_KWARGS = dict(dim=64, epochs=15, max_len=50)
 ITEM_TOKEN_LM_KWARGS = dict(dim=64, epochs=12, max_len=50)
 LLM_TWO_STAGE_CANDIDATES = 80
 
-UNIFIED_KWARGS = dict(candidate_n=200, use_social=True, sasrec_kwargs=SASREC_KWARGS)
+UNIFIED_KWARGS = dict(
+    candidate_n=200,
+    use_social=True,
+    use_extended_features=True,
+    sasrec_kwargs=SASREC_KWARGS,
+)
 TWO_TOWER_KWARGS = dict(dim=64, epochs=10)
 
 
@@ -90,6 +96,7 @@ def build_unified_two_stage(ds, use_sasrec: bool = False) -> TwoStageRecommender
         social=ds.social,
         use_sasrec=use_sasrec,
         sasrec_kwargs=UNIFIED_KWARGS["sasrec_kwargs"] if use_sasrec else None,
+        use_extended_features=UNIFIED_KWARGS["use_extended_features"],
     )
 
 
@@ -99,7 +106,7 @@ def model_configs_for_mode(mode: str) -> dict:
             "two_stage_unified": {"use_sasrec": False, **UNIFIED_KWARGS},
             "two_stage_unified_sasrec": {"use_sasrec": True, **UNIFIED_KWARGS},
         }
-    return {
+    configs = {
         "popularity": {},
         "als": {"factors": 64, "iterations": 15},
         "bpr": {"factors": 64, "iterations": 80},
@@ -110,8 +117,21 @@ def model_configs_for_mode(mode: str) -> dict:
             "candidate_n": LLM_TWO_STAGE_CANDIDATES,
             **TWO_TOWER_KWARGS,
         },
-        "two_stage_unified": {"use_sasrec": True, **UNIFIED_KWARGS},
+        "two_stage_unified": {"use_sasrec": False, **UNIFIED_KWARGS},
     }
+    if mode == "fast":
+        return {k: configs[k] for k in FAST_MODELS}
+    return configs
+
+
+FAST_MODELS = (
+    "popularity",
+    "als",
+    "bpr",
+    "sasrec",
+    "two_stage",
+    "two_stage_unified",
+)
 
 
 def build_models(ds, mode: str = "full"):
@@ -121,7 +141,7 @@ def build_models(ds, mode: str = "full"):
             "two_stage_unified": build_unified_two_stage(ds, use_sasrec=False),
             "two_stage_unified_sasrec": build_unified_two_stage(ds, use_sasrec=True),
         }
-    return {
+    base = {
         "popularity": PopularityRecommender(),
         "als": ALSRecommender(factors=64, iterations=15),
         "bpr": BPRRecommender(factors=64, iterations=80),
@@ -137,8 +157,11 @@ def build_models(ds, mode: str = "full"):
             items=ds.items,
             candidate_n=LLM_TWO_STAGE_CANDIDATES,
         ),
-        "two_stage_unified": build_unified_two_stage(ds, use_sasrec=True),
+        "two_stage_unified": build_unified_two_stage(ds, use_sasrec=False),
     }
+    if mode == "fast":
+        return {k: base[k] for k in FAST_MODELS}
+    return base
 
 
 def build_slices(ds, cutoff_quantile: float):
@@ -283,6 +306,17 @@ def run_benchmark(
 
         row = {"model": name, **metrics, "time_s": round(dt, 1)}
         rows.append(row)
+        if name == "two_stage_unified" and hasattr(model, "ranker"):
+            try:
+                imp = model.ranker.feature_importance()
+                imp_path = (
+                    settings.paths["processed"] / "ranker_feature_importance.json"
+                )
+                imp_path.parent.mkdir(parents=True, exist_ok=True)
+                imp_path.write_text(json.dumps(imp, indent=2))
+                print(f"  ranker feature importance -> {imp_path}", flush=True)
+            except Exception:
+                pass
         print(
             f"{name:28s} overall={row[f'overall_r@{k}']:.4f} "
             f"warm={row[f'warm_r@{k}']:.4f} "
@@ -401,9 +435,10 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
         "--mode",
-        choices=["full", "ab-sasrec"],
+        choices=["full", "fast", "ab-sasrec"],
         default="full",
-        help="full = all models; ab-sasrec = unified with/without SASRec ranker feature.",
+        help="full = 8 models; fast = 6 models (skip LLM + item_token_lm); "
+        "ab-sasrec = unified with/without SASRec ranker feature.",
     )
     ap.add_argument("--cutoff-quantile", type=float, default=0.9)
     ap.add_argument("--k", type=int, default=max(settings.eval_ks))

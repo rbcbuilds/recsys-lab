@@ -66,18 +66,31 @@ class MultiRetriever(Recommender):
     def recommend(
         self, users: List[str], k: int = 10, exclude_seen: bool = True
     ) -> Dict[str, List[str]]:
+        cands, _ = self.recommend_with_provenance(users, k=k, exclude_seen=exclude_seen)
+        return cands
+
+    def recommend_with_provenance(
+        self, users: List[str], k: int = 10, exclude_seen: bool = True
+    ) -> tuple[Dict[str, List[str]], Dict[str, Dict[str, Dict[str, float]]]]:
+        """Fuse retrievers and record which arm surfaced each candidate."""
         fetch = self.per_retriever or max(k, 50)
-        # Collect each retriever's ranked lists once (batched over users).
-        per_source: List[Dict[str, List[str]]] = [
-            r.recommend(users, k=fetch, exclude_seen=exclude_seen) for r in self.retrievers
-        ]
+        per_source: List[Dict[str, List[str]]] = []
+        source_names: List[str] = []
+        for r in self.retrievers:
+            per_source.append(r.recommend(users, k=fetch, exclude_seen=exclude_seen))
+            source_names.append(getattr(r, "name", r.__class__.__name__))
 
         out: Dict[str, List[str]] = {}
+        provenance: Dict[str, Dict[str, Dict[str, float]]] = {}
         for user_id in users:
             fused: Dict[str, float] = {}
-            for w, recs in zip(self.weights, per_source):
+            src_map: Dict[str, Dict[str, float]] = {}
+            for w, name, recs in zip(self.weights, source_names, per_source):
                 for rank, item in enumerate(recs.get(user_id, [])):
                     fused[item] = fused.get(item, 0.0) + w / (self.rrf_k + rank + 1)
+                    src_map.setdefault(item, {})[name] = 1.0
             ranked = sorted(fused.items(), key=lambda kv: kv[1], reverse=True)
-            out[user_id] = [item for item, _ in ranked[:k]]
-        return out
+            top = [item for item, _ in ranked[:k]]
+            out[user_id] = top
+            provenance[user_id] = {item: src_map.get(item, {}) for item in top}
+        return out, provenance

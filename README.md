@@ -80,6 +80,13 @@ python scripts/shrink_subset.py --cross-regime --max-per-user 10 --max-warm-user
 cp data/processed_philly_xreg_fast/*.parquet data/processed/
 ```
 
+Enrich item text from Yelp reviews (raises cold-item ceiling), then re-benchmark:
+
+```bash
+python scripts/enrich_item_text.py
+python scripts/benchmark.py --mode fast --force
+```
+
 ## Quickstart
 
 ```bash

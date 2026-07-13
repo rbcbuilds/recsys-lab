@@ -28,8 +28,10 @@ from ..config import settings
 from ..eval.split import temporal_split
 from .base import Recommender
 from .ranker import LightGBMRanker
+from .ranker_features import ExtendedRankerFeatures
 from .sasrec import SASRecRecommender
 from .social import SocialRecommender
+from .multi_retriever import MultiRetriever
 
 
 class TwoStageRecommender(Recommender):
@@ -46,6 +48,7 @@ class TwoStageRecommender(Recommender):
         social_kwargs: Optional[dict] = None,
         use_sasrec: bool = False,
         sasrec_kwargs: Optional[dict] = None,
+        use_extended_features: bool = True,
         verbose: bool = False,
     ):
         """
@@ -80,6 +83,7 @@ class TwoStageRecommender(Recommender):
         self.social_kwargs = social_kwargs or {}
         self.use_sasrec = use_sasrec
         self.sasrec_kwargs = sasrec_kwargs or {}
+        self.use_extended_features = use_extended_features
         self.verbose = verbose
         self.ranker = LightGBMRanker(verbose=verbose, **self.ranker_kwargs)
         self._social_model: Optional[SocialRecommender] = None
@@ -109,8 +113,6 @@ class TwoStageRecommender(Recommender):
         self.retriever.fit(ret_train)
 
         # Social / SASRec models (optional) fit on ret_train for ranker features.
-        train_social_scores = None
-        train_sasrec_scores = None
         if self.use_social:
             self._social_model = SocialRecommender(social=self.social, **self.social_kwargs)
             self._social_model.fit(ret_train)
@@ -119,14 +121,21 @@ class TwoStageRecommender(Recommender):
             self._sasrec_model.fit(ret_train)
 
         label_users = list(rank_label_positives.keys())
-        candidates = self.retriever.recommend(
+        candidates, provenance = self._retrieve_candidates(
             label_users, k=self.candidate_n, exclude_seen=True
         )
         retrieval_scores = self._score_candidates(label_users, candidates)
+        train_social_scores = None
+        train_sasrec_scores = None
+        train_extended = None
         if self.use_social:
             train_social_scores = self._social_model.score_candidates(candidates)
         if self.use_sasrec:
             train_sasrec_scores = self._sasrec_model.score_candidates(candidates)
+        if self.use_extended_features:
+            train_extended = self._build_extended_features(
+                ret_train, candidates, provenance
+            )
         labels = {
             u: {item: 1.0 for item in items}
             for u, items in rank_label_positives.items()
@@ -135,7 +144,8 @@ class TwoStageRecommender(Recommender):
         if self.verbose:
             print(
                 f"  training ranker (use_social={self.use_social}, "
-                f"use_sasrec={self.use_sasrec})..."
+                f"use_sasrec={self.use_sasrec}, "
+                f"use_extended={self.use_extended_features})..."
             )
         # Features from full train aggregates (user/item stats); labels from holdout.
         self.ranker.fit(
@@ -145,6 +155,7 @@ class TwoStageRecommender(Recommender):
             labels=labels,
             social_scores=train_social_scores,
             sasrec_scores=train_sasrec_scores,
+            extended_features=train_extended,
         )
 
         # Re-fit retriever and feature models on all train for inference-time recall.
@@ -165,7 +176,9 @@ class TwoStageRecommender(Recommender):
 
         # Retrieve a wider pool, then re-rank down to k.
         n = max(self.candidate_n, k)
-        candidates = self.retriever.recommend(users, k=n, exclude_seen=exclude_seen)
+        candidates, provenance = self._retrieve_candidates(
+            users, k=n, exclude_seen=exclude_seen
+        )
         retrieval_scores = self._score_candidates(users, candidates)
         social_scores = (
             self._social_model.score_candidates(candidates) if self.use_social else None
@@ -173,12 +186,44 @@ class TwoStageRecommender(Recommender):
         sasrec_scores = (
             self._sasrec_model.score_candidates(candidates) if self.use_sasrec else None
         )
+        extended_features = (
+            self._build_extended_features(self._train, candidates, provenance)
+            if self.use_extended_features
+            else None
+        )
         return self.ranker.rerank(
             candidates,
             retrieval_scores,
             k=k,
             social_scores=social_scores,
             sasrec_scores=sasrec_scores,
+            extended_features=extended_features,
+        )
+
+    def _retrieve_candidates(
+        self, users: List[str], k: int, exclude_seen: bool
+    ) -> tuple[Dict[str, List[str]], Optional[Dict[str, Dict[str, Dict[str, float]]]]]:
+        if isinstance(self.retriever, MultiRetriever):
+            return self.retriever.recommend_with_provenance(
+                users, k=k, exclude_seen=exclude_seen
+            )
+        return self.retriever.recommend(users, k=k, exclude_seen=exclude_seen), None
+
+    def _build_extended_features(
+        self,
+        train: pd.DataFrame,
+        candidates: Dict[str, List[str]],
+        provenance: Optional[Dict[str, Dict[str, Dict[str, float]]]],
+    ) -> Dict[str, Dict[str, Dict[str, float]]]:
+        builder = ExtendedRankerFeatures(train)
+        content = ExtendedRankerFeatures.content_retriever_from_multi(self.retriever)
+        content_scores = (
+            content.score_candidates(candidates) if content is not None else None
+        )
+        return builder.build(
+            candidates,
+            retrieval_sources=provenance,
+            content_scores=content_scores,
         )
 
     # ------------------------------------------------------------- helpers

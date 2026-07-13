@@ -1,27 +1,4 @@
-"""Extended ranker features for cross-regime routing  [SCAFFOLD — Tier 1].
-
-The unified two-stage already fuses complementary retrievers. The next step is
-teaching the ranker *which signal to trust* per (user, item) without adding more
-retrieval arms.
-
-Candidate features to add to ``LightGBMRanker._feature_row``:
-
-| Feature | Source | Regime it helps |
-|---|---|---|
-| ``content_score`` | ``ContentBasedRecommender.score_candidates`` | cold-item |
-| ``sasrec_score`` | already wired via ``use_sasrec`` | warm |
-| ``social_score`` | already wired via ``use_social`` | cold-user |
-| ``retriever_source`` | one-hot / count: which MultiRetriever arm surfaced item | routing |
-| ``user_activity_bucket`` | log(train interactions) binned: tail vs dense | all |
-| ``item_age_days`` | days since first interaction (global-time coldness) | cold-item |
-
-Implementation sketch:
-  1. Extend ``TwoStageRecommender._score_candidates`` to collect optional scores.
-  2. Pass ``content_scores``, ``source_flags`` into ``ranker.fit`` / ``rerank``.
-  3. Compare unified with/without on warm / cold-item / cold-user slices.
-
-Interview point: feature ablation table beats adding a 6th retriever.
-"""
+"""Extended ranker features for cross-regime routing."""
 
 from __future__ import annotations
 
@@ -29,7 +6,16 @@ from typing import Dict, List, Optional
 
 import pandas as pd
 
+from ..config import settings
 from .base import Recommender
+
+# Maps MultiRetriever child ``name`` → ranker feature column.
+SOURCE_NAME_TO_FEATURE = {
+    "two_tower": "retriever_source_two_tower",
+    "content_based": "retriever_source_content",
+    "social": "retriever_source_social",
+    "popularity": "retriever_source_popularity",
+}
 
 
 class ExtendedRankerFeatures:
@@ -45,18 +31,67 @@ class ExtendedRankerFeatures:
         "item_age_days",
     )
 
+    def __init__(self, train: pd.DataFrame):
+        u, i, t = settings.user_col, settings.item_col, settings.time_col
+        uc = train.groupby(u).size()
+        self._user_bucket: Dict[str, float] = {}
+        for uid, n in uc.items():
+            if n <= 1:
+                b = 0.0
+            elif n <= 5:
+                b = 1.0
+            elif n <= 20:
+                b = 2.0
+            else:
+                b = 3.0
+            self._user_bucket[str(uid)] = b
+
+        ts = pd.to_datetime(train[t])
+        self._ref_time = ts.max()
+        first = train.groupby(i)[t].min()
+        self._item_age_days: Dict[str, float] = {}
+        for iid, t0 in first.items():
+            days = (self._ref_time - pd.to_datetime(t0)).total_seconds() / 86400.0
+            self._item_age_days[str(iid)] = float(max(days, 0.0))
+
     def build(
         self,
-        train: pd.DataFrame,
         candidates: Dict[str, List[str]],
-        retrieval_sources: Optional[Dict[str, Dict[str, List[str]]]] = None,
-        content_model: Optional[Recommender] = None,
+        retrieval_sources: Optional[Dict[str, Dict[str, Dict[str, float]]]] = None,
+        content_scores: Optional[Dict[str, Dict[str, float]]] = None,
     ) -> Dict[str, Dict[str, Dict[str, float]]]:
-        """Per-user, per-item feature values for ranker training/inference.
+        """Per-user, per-item feature values for ranker training/inference."""
+        retrieval_sources = retrieval_sources or {}
+        content_scores = content_scores or {}
+        out: Dict[str, Dict[str, Dict[str, float]]] = {}
 
-        Returns ``{user_id: {item_id: {feature_name: value}}}``.
-        """
-        raise NotImplementedError(
-            "Wire content_score and MultiRetriever source flags into the "
-            "LightGBM ranker. See this module's docstring."
-        )
+        for user_id, items in candidates.items():
+            u = str(user_id)
+            user_feats: Dict[str, Dict[str, float]] = {}
+            src_map = retrieval_sources.get(u, {})
+            cscores = content_scores.get(u, {})
+            for item_id in items:
+                it = str(item_id)
+                src = src_map.get(it, {})
+                row = {
+                    "content_score": float(cscores.get(it, 0.0)),
+                    "retriever_source_two_tower": float(src.get("two_tower", 0.0)),
+                    "retriever_source_content": float(src.get("content_based", 0.0)),
+                    "retriever_source_social": float(src.get("social", 0.0)),
+                    "retriever_source_popularity": float(src.get("popularity", 0.0)),
+                    "user_activity_bucket": self._user_bucket.get(u, 0.0),
+                    "item_age_days": self._item_age_days.get(it, 365.0),
+                }
+                user_feats[it] = row
+            out[u] = user_feats
+        return out
+
+    @staticmethod
+    def content_retriever_from_multi(retriever: Recommender) -> Optional[Recommender]:
+        """Return the content arm inside a ``MultiRetriever``, if present."""
+        if getattr(retriever, "name", "") != "multi_retriever":
+            return None
+        for child in getattr(retriever, "retrievers", []):
+            if getattr(child, "name", "") == "content_based":
+                return child
+        return None

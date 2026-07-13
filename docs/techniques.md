@@ -277,12 +277,12 @@ Takeaways: two-stage beats retrieval-alone; social adds a further lift as a rank
 
 ## Extension points (scaffolds by tier)
 
-### Tier 1 — highest ROI for this repo
-| Scaffold | Path | Goal |
+### Tier 1 — highest ROI for this repo (implemented)
+| Module | Path | Status |
 |---|---|---|
-| Review-text enrichment | `data/review_text.py` | Raise cold-item ceiling (aggregate Yelp review snippets) |
-| Extended ranker features | `models/ranker_features.py` | `content_score`, retriever source, activity bucket |
-| Benchmark gaps | `scripts/benchmark.py` | Run `item_token_lm`, `two_stage_llm`, `--mode ab-sasrec` |
+| Review-text enrichment | `data/review_text.py`, `scripts/enrich_item_text.py` | **Done** — stream reviews → enriched `items.text` |
+| Extended ranker features | `models/ranker_features.py` | **Done** — `content_score`, retriever source flags, activity bucket, item age |
+| Benchmark | `scripts/benchmark.py` | **Done** — `--mode fast`, cache, unified default `use_sasrec=False` |
 
 ### Tier 2 — strong learning value (already stubbed)
 | Scaffold | Path | Goal |
