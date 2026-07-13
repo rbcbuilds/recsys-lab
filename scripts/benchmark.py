@@ -19,12 +19,16 @@ Run:
 
     python scripts/benchmark.py
     python scripts/benchmark.py --mode ab-sasrec   # unified with/without SASRec ranker feature
+
+Cached reruns skip fit+recommend for models already in artifacts/benchmark_cache/.
+Use --force to retrain everything.
 """
 
 from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 import time
 from datetime import date
@@ -40,6 +44,11 @@ import pandas as pd
 from src.recsys.config import settings
 from src.recsys.data import load_dataset
 from src.recsys.eval import evaluate, global_temporal_split
+from src.recsys.eval.cache import (
+    load_model_cache,
+    run_cache_dir,
+    save_model_cache,
+)
 from src.recsys.models import (
     ALSRecommender,
     BPRRecommender,
@@ -58,15 +67,17 @@ REPORT_PATH = Path(__file__).resolve().parents[1] / "docs" / "benchmarks.md"
 
 SASREC_KWARGS = dict(dim=64, epochs=15, max_len=50)
 ITEM_TOKEN_LM_KWARGS = dict(dim=64, epochs=12, max_len=50)
-# Cross-encoder scoring is O(users × candidates); keep the pool smaller than GBM ranker.
 LLM_TWO_STAGE_CANDIDATES = 80
+
+UNIFIED_KWARGS = dict(candidate_n=200, use_social=True, sasrec_kwargs=SASREC_KWARGS)
+TWO_TOWER_KWARGS = dict(dim=64, epochs=10)
 
 
 def build_unified_two_stage(ds, use_sasrec: bool = False) -> TwoStageRecommender:
     """Multi-retriever pipeline meant to span warm, cold-item, and cold-user."""
     retriever = MultiRetriever(
         [
-            TwoTowerRecommender(dim=64, epochs=10),
+            TwoTowerRecommender(**TWO_TOWER_KWARGS),
             ContentBasedRecommender(items=ds.items),
             SocialRecommender(social=ds.social),
             PopularityRecommender(),
@@ -74,12 +85,33 @@ def build_unified_two_stage(ds, use_sasrec: bool = False) -> TwoStageRecommender
     )
     return TwoStageRecommender(
         retriever,
-        candidate_n=200,
-        use_social=True,
+        candidate_n=UNIFIED_KWARGS["candidate_n"],
+        use_social=UNIFIED_KWARGS["use_social"],
         social=ds.social,
         use_sasrec=use_sasrec,
-        sasrec_kwargs=SASREC_KWARGS if use_sasrec else None,
+        sasrec_kwargs=UNIFIED_KWARGS["sasrec_kwargs"] if use_sasrec else None,
     )
+
+
+def model_configs_for_mode(mode: str) -> dict:
+    if mode == "ab-sasrec":
+        return {
+            "two_stage_unified": {"use_sasrec": False, **UNIFIED_KWARGS},
+            "two_stage_unified_sasrec": {"use_sasrec": True, **UNIFIED_KWARGS},
+        }
+    return {
+        "popularity": {},
+        "als": {"factors": 64, "iterations": 15},
+        "bpr": {"factors": 64, "iterations": 80},
+        "sasrec": SASREC_KWARGS,
+        "item_token_lm": ITEM_TOKEN_LM_KWARGS,
+        "two_stage": {"candidate_n": 200, "use_social": False, **TWO_TOWER_KWARGS},
+        "two_stage_llm": {
+            "candidate_n": LLM_TWO_STAGE_CANDIDATES,
+            **TWO_TOWER_KWARGS,
+        },
+        "two_stage_unified": {"use_sasrec": True, **UNIFIED_KWARGS},
+    }
 
 
 def build_models(ds, mode: str = "full"):
@@ -96,10 +128,12 @@ def build_models(ds, mode: str = "full"):
         "sasrec": SASRecRecommender(**SASREC_KWARGS),
         "item_token_lm": ItemTokenLMRecommender(**ITEM_TOKEN_LM_KWARGS),
         "two_stage": TwoStageRecommender(
-            TwoTowerRecommender(dim=64, epochs=10), candidate_n=200, use_social=False
+            TwoTowerRecommender(**TWO_TOWER_KWARGS),
+            candidate_n=200,
+            use_social=False,
         ),
         "two_stage_llm": LLMTwoStageRecommender(
-            retriever=TwoTowerRecommender(dim=64, epochs=10),
+            retriever=TwoTowerRecommender(**TWO_TOWER_KWARGS),
             items=ds.items,
             candidate_n=LLM_TWO_STAGE_CANDIDATES,
         ),
@@ -145,7 +179,43 @@ def slice_ground_truth(test_pos, cold_items, cold_users):
     return warm, ci, cu
 
 
-def run_benchmark(ds, cutoff_quantile: float, k: int, models: dict):
+def _score_recs(recs, test_pos, warm_gt, ci_gt, cu_gt, k: int) -> dict:
+    overall = evaluate(recs, test_pos, ks=(k, 10))
+    warm = evaluate(recs, warm_gt, ks=(k,)) if warm_gt else {}
+    ci = evaluate(recs, ci_gt, ks=(k,)) if ci_gt else {}
+    cu = evaluate(recs, cu_gt, ks=(k,)) if cu_gt else {}
+    return {
+        f"overall_r@{k}": overall.get(f"recall@{k}", 0.0),
+        f"warm_r@{k}": warm.get(f"recall@{k}", 0.0),
+        f"cold_item_r@{k}": ci.get(f"recall@{k}", 0.0),
+        f"cold_user_r@{k}": cu.get(f"recall@{k}", 0.0),
+        "ndcg@10": overall.get("ndcg@10", 0.0),
+    }
+
+
+def _cache_key(model_name: str, model_config: dict) -> str:
+    """Canonical cache identity (share hits across benchmark modes when config matches)."""
+    if model_config.get("use_sasrec") is True and model_name in (
+        "two_stage_unified",
+        "two_stage_unified_sasrec",
+    ):
+        return "unified_sasrec_ranker"
+    if model_config.get("use_sasrec") is False and model_name == "two_stage_unified":
+        return "unified_no_sasrec"
+    return model_name
+
+
+def run_benchmark(
+    ds,
+    cutoff_quantile: float,
+    k: int,
+    models: dict,
+    *,
+    mode: str,
+    use_cache: bool = True,
+    force: bool = False,
+    only: set[str] | None = None,
+):
     train, test_pos, cold_items, cold_users = build_slices(ds, cutoff_quantile)
     warm_gt, ci_gt, cu_gt = slice_ground_truth(test_pos, cold_items, cold_users)
     users = sorted(set(warm_gt) | set(ci_gt) | set(cu_gt))
@@ -159,6 +229,12 @@ def run_benchmark(ds, cutoff_quantile: float, k: int, models: dict):
         cu_u=len(cu_gt),
     )
 
+    cache_dir = run_cache_dir(
+        cutoff_quantile=cutoff_quantile,
+        k=k,
+    )
+    configs = model_configs_for_mode(mode)
+
     print(f"split: {split_desc}", flush=True)
     print(
         f"cold items={counts['n_cold_items']:,} cold users={counts['n_cold_users']:,}; "
@@ -167,38 +243,51 @@ def run_benchmark(ds, cutoff_quantile: float, k: int, models: dict):
     )
     print(
         f"slice users: warm={counts['warm_u']:,} cold_item={counts['ci_u']:,} "
-        f"cold_user={counts['cu_u']:,}\n",
+        f"cold_user={counts['cu_u']:,}",
         flush=True,
     )
+    if use_cache:
+        print(f"cache: {cache_dir} ({'force retrain' if force else 'reuse hits'})", flush=True)
+    print(flush=True)
 
     rows = []
     t_all = time.time()
     for name, model in models.items():
-        t = time.time()
-        model.fit(train)
-        recs = model.recommend(users, k=k)
-        dt = time.time() - t
+        if only is not None and name not in only:
+            continue
 
-        overall = evaluate(recs, test_pos, ks=(k, 10))
-        warm = evaluate(recs, warm_gt, ks=(k,)) if warm_gt else {}
-        ci = evaluate(recs, ci_gt, ks=(k,)) if ci_gt else {}
-        cu = evaluate(recs, cu_gt, ks=(k,)) if cu_gt else {}
+        cfg = configs[name]
+        ckey = _cache_key(name, cfg)
+        cached = None if (force or not use_cache) else load_model_cache(cache_dir, ckey, cfg)
+        if cached is not None:
+            recs = {u: list(items) for u, items in cached["recs"].items()}
+            metrics = cached["metrics"]
+            dt = float(cached.get("time_s", 0.0))
+            tag = "cached"
+        else:
+            t = time.time()
+            model.fit(train)
+            recs = model.recommend(users, k=k)
+            dt = time.time() - t
+            metrics = _score_recs(recs, test_pos, warm_gt, ci_gt, cu_gt, k)
+            if use_cache:
+                save_model_cache(
+                    cache_dir,
+                    ckey,
+                    cfg,
+                    recs=recs,
+                    metrics=metrics,
+                    time_s=round(dt, 1),
+                )
+            tag = f"{dt:.1f}s"
 
-        row = {
-            "model": name,
-            f"overall_r@{k}": overall.get(f"recall@{k}", 0.0),
-            f"warm_r@{k}": warm.get(f"recall@{k}", 0.0),
-            f"cold_item_r@{k}": ci.get(f"recall@{k}", 0.0),
-            f"cold_user_r@{k}": cu.get(f"recall@{k}", 0.0),
-            "ndcg@10": overall.get("ndcg@10", 0.0),
-            "time_s": round(dt, 1),
-        }
+        row = {"model": name, **metrics, "time_s": round(dt, 1)}
         rows.append(row)
         print(
             f"{name:28s} overall={row[f'overall_r@{k}']:.4f} "
             f"warm={row[f'warm_r@{k}']:.4f} "
             f"cold_item={row[f'cold_item_r@{k}']:.4f} "
-            f"cold_user={row[f'cold_user_r@{k}']:.4f} ({dt:.1f}s)",
+            f"cold_user={row[f'cold_user_r@{k}']:.4f} ({tag})",
             flush=True,
         )
 
@@ -207,9 +296,7 @@ def run_benchmark(ds, cutoff_quantile: float, k: int, models: dict):
     return df, split_desc, counts, total
 
 
-def write_report(
-    df, ds, k: int, split_desc: str, counts: dict, total: float, mode: str
-) -> None:
+def _render_table(df, k: int) -> str:
     cols = [
         f"overall_r@{k}",
         f"warm_r@{k}",
@@ -223,21 +310,27 @@ def write_report(
     for name in df.index:
         cells = " | ".join(f"{df.loc[name, c]:.4f}" for c in cols)
         lines.append(f"| {name} | {cells} | {df.loc[name, 'time_s']:.1f} |")
-    table = "\n".join(lines)
+    return "\n".join(lines)
 
-    section_title = (
-        "SASRec ranker feature A/B (unified pipeline)"
-        if mode == "ab-sasrec"
-        else "Cross-regime Philadelphia"
-    )
-    mode_note = (
-        "\n- **Comparison:** `two_stage_unified` vs `two_stage_unified_sasrec` — "
-        "identical `MultiRetriever`, ranker gains `sasrec_score` in the second row.\n"
-        if mode == "ab-sasrec"
-        else ""
-    )
 
-    content = f"""# Benchmark results
+HOW_TO_READ = """## How to read this
+
+- **overall_r@20** — recall across all test positives (the blended score).
+- **warm_r@20** — dense regime: user and item both seen in train (collaborative signal).
+- **cold_item_r@20** — target item never seen in train (content signal).
+- **cold_user_r@20** — user never seen in train (social / popularity signal).
+- **ndcg@10** — ranking quality on the full test set.
+
+Collaborative models (als, bpr, sasrec, two_stage) should be strong on warm and
+near-zero on both cold slices. Popularity lifts cold-user. The unified two-stage
+(`MultiRetriever` → ranker) is the architecture meant to stay non-zero across all
+three regimes. **Generative / language models:** `item_token_lm` autoregressively
+generates item tokens; `two_stage_llm` re-ranks two-tower candidates with a
+cross-encoder (candidate pool=80). Cold-item recall stays
+low on Yelp because item text is only name + categories — see `docs/techniques.md`.
+"""
+
+REPORT_INTRO = """# Benchmark results
 
 Auto-generated by `scripts/benchmark.py`. One realistic dataset (dense core +
 cold tail), one global-time split, every model scored on **overall**, **warm**,
@@ -248,38 +341,60 @@ python scripts/benchmark.py
 python scripts/benchmark.py --mode ab-sasrec
 ```
 
-## {section_title}
-
-One model, one training set, four views. Cold entities arise naturally under a
-single wall-clock cutoff — not simulated. See `docs/techniques.md`.
-{mode_note}
-- **Dataset:** {ds.summary()}
-- **Split:** {split_desc}
-- **Cold sets:** {counts['n_cold_items']:,} cold items, {counts['n_cold_users']:,} cold users
-- **Slice users:** warm={counts['warm_u']:,}, cold-item={counts['ci_u']:,}, cold-user={counts['cu_u']:,}
-- **Run date:** {date.today().isoformat()}
-- **Total run time:** {total:.0f}s (single-thread BLAS, laptop CPU)
-
-{table}
-
-## How to read this
-
-- **overall_r@{k}** — recall across all test positives (the blended score).
-- **warm_r@{k}** — dense regime: user and item both seen in train (collaborative signal).
-- **cold_item_r@{k}** — target item never seen in train (content signal).
-- **cold_user_r@{k}** — user never seen in train (social / popularity signal).
-- **ndcg@10** — ranking quality on the full test set.
-
-Collaborative models (als, bpr, sasrec, two_stage) should be strong on warm and
-near-zero on both cold slices. Popularity lifts cold-user. The unified two-stage
-(`MultiRetriever` → ranker) is the architecture meant to stay non-zero across all
-three regimes. **Generative / language models:** `item_token_lm` autoregressively
-generates item tokens; `two_stage_llm` re-ranks two-tower candidates with a
-cross-encoder (candidate pool={LLM_TWO_STAGE_CANDIDATES}). Cold-item recall stays
-low on Yelp because item text is only name + categories — see `docs/techniques.md`.
+Cached per-model results live under `artifacts/benchmark_cache/`; pass `--force`
+to retrain everything.
 """
+
+FULL_SECTION = "Cross-regime Philadelphia"
+AB_SECTION = "SASRec ranker feature A/B (unified pipeline)"
+
+
+def _parse_sections(existing: str) -> dict[str, str]:
+    titles = (FULL_SECTION, AB_SECTION)
+    out: dict[str, str] = {}
+    for title in titles:
+        pattern = rf"## {re.escape(title)}\n\n(.*?)(?=\n## |\Z)"
+        m = re.search(pattern, existing, flags=re.DOTALL)
+        if m:
+            out[title] = m.group(1).strip()
+    return out
+
+
+def write_report(
+    df, ds, k: int, split_desc: str, counts: dict, total: float, mode: str
+) -> None:
+    section_title = AB_SECTION if mode == "ab-sasrec" else FULL_SECTION
+    mode_note = (
+        "**Comparison:** `two_stage_unified` vs `two_stage_unified_sasrec` — "
+        "identical `MultiRetriever`, ranker gains `sasrec_score` in the second row.\n\n"
+        if mode == "ab-sasrec"
+        else ""
+    )
+
+    section_body = (
+        f"One model, one training set, four views. Cold entities arise naturally under a\n"
+        f"single wall-clock cutoff — not simulated. See `docs/techniques.md`.\n\n"
+        f"{mode_note}"
+        f"- **Dataset:** {ds.summary()}\n"
+        f"- **Split:** {split_desc}\n"
+        f"- **Cold sets:** {counts['n_cold_items']:,} cold items, {counts['n_cold_users']:,} cold users\n"
+        f"- **Slice users:** warm={counts['warm_u']:,}, cold-item={counts['ci_u']:,}, cold-user={counts['cu_u']:,}\n"
+        f"- **Run date:** {date.today().isoformat()}\n"
+        f"- **Total run time:** {total:.0f}s (single-thread BLAS, laptop CPU)\n\n"
+        f"{_render_table(df, k)}"
+    )
+
     REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    REPORT_PATH.write_text(content)
+    sections = _parse_sections(REPORT_PATH.read_text()) if REPORT_PATH.exists() else {}
+    sections[section_title] = section_body
+
+    parts = [REPORT_INTRO]
+    if FULL_SECTION in sections:
+        parts.append(f"## {FULL_SECTION}\n\n{sections[FULL_SECTION]}")
+    if AB_SECTION in sections:
+        parts.append(f"## {AB_SECTION}\n\n{sections[AB_SECTION]}")
+    parts.append(HOW_TO_READ)
+    REPORT_PATH.write_text("\n".join(parts) + "\n")
 
 
 def main() -> None:
@@ -293,14 +408,29 @@ def main() -> None:
     ap.add_argument("--cutoff-quantile", type=float, default=0.9)
     ap.add_argument("--k", type=int, default=max(settings.eval_ks))
     ap.add_argument("--no-write", action="store_true", help="Print only; skip benchmarks.md.")
+    ap.add_argument("--no-cache", action="store_true", help="Disable per-model cache.")
+    ap.add_argument("--force", action="store_true", help="Ignore cache and retrain all models.")
+    ap.add_argument(
+        "--only",
+        default=None,
+        help="Comma-separated model keys to run (others skipped).",
+    )
     args = ap.parse_args()
 
     ds = load_dataset()
     print("DATA:", ds.summary(), flush=True)
 
     models = build_models(ds, mode=args.mode)
+    only = set(args.only.split(",")) if args.only else None
     df, split_desc, counts, total = run_benchmark(
-        ds, args.cutoff_quantile, args.k, models
+        ds,
+        args.cutoff_quantile,
+        args.k,
+        models,
+        mode=args.mode,
+        use_cache=not args.no_cache,
+        force=args.force,
+        only=only,
     )
 
     print(f"\n=== CROSS-REGIME BENCHMARK (recall@{args.k}, mode={args.mode}) ===")
@@ -309,7 +439,12 @@ def main() -> None:
     processed_dir = settings.paths["processed"]
     processed_dir.mkdir(parents=True, exist_ok=True)
     csv_name = "benchmark_results_ab_sasrec.csv" if args.mode == "ab-sasrec" else "benchmark_results.csv"
-    df.to_csv(processed_dir / csv_name)
+    csv_path = processed_dir / csv_name
+    if only and csv_path.exists():
+        prev = pd.read_csv(csv_path, index_col=0)
+        prev = prev.drop(index=[x for x in df.index if x in prev.index], errors="ignore")
+        df = pd.concat([prev, df])
+    df.to_csv(csv_path)
 
     if not args.no_write:
         write_report(df, ds, args.k, split_desc, counts, total, args.mode)

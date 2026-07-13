@@ -73,7 +73,12 @@ python scripts/benchmark.py
 python scripts/benchmark.py --mode ab-sasrec
 ```
 
-To shrink further for faster iteration: `python scripts/shrink_subset.py --max-users 2000 --max-per-user 40`
+To shrink for faster iteration (cap=10, top-1000 warm by social+sequence, cold users pinned):
+
+```bash
+python scripts/shrink_subset.py --cross-regime --max-per-user 10 --max-warm-users 1000 --user-select social_seq
+cp data/processed_philly_xreg_fast/*.parquet data/processed/
+```
 
 ## Quickstart
 

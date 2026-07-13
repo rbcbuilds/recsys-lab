@@ -327,6 +327,191 @@ def build_crossregime_subset(
     )
 
 
+def _score_warm_users_social_seq(
+    pre: pd.DataFrame,
+    warm_users: set,
+    social: pd.DataFrame | None,
+    u: str,
+    t: str,
+    *,
+    w_social: float = 0.35,
+    w_embed: float = 0.25,
+    w_pre: float = 0.25,
+    w_seq: float = 0.15,
+) -> pd.Series:
+    """Rank warm users for retention: social degree, friend activity, sequence quality."""
+    warm = sorted(warm_users)
+    pre_cnt = pre.groupby(u).size().reindex(warm, fill_value=0).astype(float)
+
+    social_deg = pd.Series(0.0, index=warm)
+    embed = pd.Series(0.0, index=warm)
+    if social is not None and len(social):
+        edges = pd.concat(
+            [
+                social[[u, "friend_id"]].rename(columns={u: "a", "friend_id": "b"}),
+                social[[u, "friend_id"]].rename(columns={"friend_id": "a", u: "b"}),
+            ],
+            ignore_index=True,
+        )
+        social_deg = (
+            edges.groupby("a")
+            .size()
+            .reindex(warm, fill_value=0)
+            .astype(float)
+        )
+        friend_lists = edges.groupby("a")["b"].apply(list)
+        embed = pd.Series(
+            {
+                uid: sum(pre_cnt.get(f, 0) for f in friend_lists.get(uid, ()))
+                for uid in warm
+            },
+            dtype=float,
+        )
+
+    seq_scores = pd.Series(0.0, index=warm)
+    week_sec = 7 * 86400
+    for uid in warm:
+        times = pd.to_datetime(pre.loc[pre[u] == uid, t]).sort_values()
+        n = len(times)
+        if n < 2:
+            continue
+        span = max((times.iloc[-1] - times.iloc[0]).total_seconds(), week_sec)
+        months = span / (30 * 86400)
+        density = n / months
+        gaps = times.diff().dt.total_seconds().dropna()
+        regularity = 1.0 / (1.0 + gaps.median() / week_sec) if len(gaps) else 0.0
+        seq_scores[uid] = density * regularity
+
+    def _norm(s: pd.Series) -> pd.Series:
+        hi = float(s.max())
+        return s / hi if hi > 0 else s * 0.0
+
+    score = (
+        w_social * _norm(social_deg)
+        + w_embed * _norm(embed)
+        + w_pre * _norm(pre_cnt)
+        + w_seq * _norm(seq_scores)
+    )
+    return score.sort_values(ascending=False)
+
+
+def downsample_crossregime_processed(
+    max_per_user: int = 20,
+    max_warm_users: int | None = None,
+    user_select: str = "activity",
+    cutoff_quantile: float = 0.9,
+    processed_dir: Path = PROCESSED_DIR,
+    out_dir: Path | None = None,
+) -> None:
+    """Shrink a cross-regime slice for faster benchmarks without losing cold tail.
+
+    Caps each user's *pre-cutoff* history to their ``max_per_user`` most recent
+    interactions (where ~90% of rows live). Post-cutoff rows are kept in full —
+    that is where cold users, cold items, and test positives live, so the
+    global-time eval story stays intact. No re-densify step (cold entities are
+    low-activity by design and would be dropped by ``min_item_reviews=10``).
+
+    When ``max_warm_users`` is set, retain that many *warm* users (seen before
+    the cutoff) and always keep every cold user. ``user_select`` chooses how
+    warm users are ranked:
+
+    * ``activity`` — most pre-cutoff reviews (default).
+    * ``social_seq`` — composite of social degree, friends' activity, review
+      count, and sequential density/regularity (better for social + SASRec).
+    """
+    from ..config import settings
+
+    if user_select not in ("activity", "social_seq"):
+        raise ValueError(f"user_select must be 'activity' or 'social_seq', got {user_select!r}")
+
+    processed_dir = Path(processed_dir)
+    out_dir = Path(out_dir) if out_dir is not None else processed_dir
+    u, i, t = settings.user_col, settings.item_col, settings.time_col
+
+    inter = pd.read_parquet(processed_dir / "interactions.parquet")
+    social_path = processed_dir / "social.parquet"
+    social = pd.read_parquet(social_path) if social_path.exists() else None
+
+    ts = pd.to_datetime(inter[t])
+    cutoff = ts.quantile(cutoff_quantile)
+
+    pre = inter[ts <= cutoff]
+    post = inter[ts > cutoff]
+    warm_users = set(pre[u])
+    cold_users = set(post[u]) - warm_users
+
+    if max_warm_users is not None:
+        if user_select == "activity":
+            ranked = pre.groupby(u).size().sort_values(ascending=False)
+        else:
+            if social is None:
+                raise ValueError("social_seq selection requires social.parquet in processed_dir.")
+            ranked = _score_warm_users_social_seq(pre, warm_users, social, u, t)
+        selected_warm = set(ranked.head(max_warm_users).index.astype(str))
+        keep_users = selected_warm | cold_users
+        inter = inter[inter[u].isin(keep_users)]
+
+    ts = pd.to_datetime(inter[t])
+    pre = inter[ts <= cutoff]
+    post = inter[ts > cutoff]
+    pre_cap = pre.sort_values(t).groupby(u, group_keys=False).tail(max_per_user)
+    shrunk = (
+        pd.concat([pre_cap, post])
+        .drop_duplicates(subset=[u, i, t])
+        .sort_values([u, t])
+        .reset_index(drop=True)
+    )
+
+    keep_users = set(shrunk[u])
+    keep_items = set(shrunk[i])
+    n_warm = len(keep_users - cold_users)
+    n_cold = len(keep_users & cold_users)
+
+    items = pd.read_parquet(processed_dir / "items.parquet")
+    items = items[items[i].isin(keep_items)].reset_index(drop=True)
+    users = pd.read_parquet(processed_dir / "users.parquet")
+    users = users[users[u].isin(keep_users)].reset_index(drop=True)
+
+    if social is not None:
+        social = social[
+            social[u].isin(keep_users) & social["friend_id"].isin(keep_users)
+        ].reset_index(drop=True)
+        n_social = len(social)
+    else:
+        n_social = 0
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    shrunk.to_parquet(out_dir / "interactions.parquet", index=False)
+    items.to_parquet(out_dir / "items.parquet", index=False)
+    users.to_parquet(out_dir / "users.parquet", index=False)
+    if social is not None:
+        social.to_parquet(out_dir / "social.parquet", index=False)
+
+    train_users = set(shrunk[pd.to_datetime(shrunk[t]) <= cutoff][u])
+    train_items = set(shrunk[pd.to_datetime(shrunk[t]) <= cutoff][i])
+    test = shrunk[pd.to_datetime(shrunk[t]) > cutoff]
+    nat_cold_items = set(test[i]) - train_items
+    nat_cold_users = set(test[u]) - train_users
+    density = len(shrunk) / (len(users) * len(items) or 1)
+    select_note = (
+        f"  warm_users={n_warm:,} (select={user_select}, cap={max_warm_users}), "
+        f"cold_users={n_cold:,} (pinned)\n"
+        if max_warm_users is not None
+        else ""
+    )
+    print(
+        f"Cross-regime downsample {'-> ' + str(out_dir) if out_dir != processed_dir else 'in ' + str(out_dir)}:\n"
+        f"  users={len(users):,} items={len(items):,} "
+        f"interactions={len(shrunk):,} density={density:.4%} "
+        f"social_edges={n_social:,}\n"
+        f"{select_note}"
+        f"  warm cap: max_per_user={max_per_user} pre-cutoff only "
+        f"(cutoff q={cutoff_quantile}, T={pd.Timestamp(cutoff)})\n"
+        f"  under global split @T -> cold items={len(nat_cold_items):,} "
+        f"cold users={len(nat_cold_users):,}"
+    )
+
+
 def downsample_processed(
     max_users: int = 2500,
     max_per_user: int | None = None,

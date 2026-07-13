@@ -6,28 +6,53 @@ cold tail), one global-time split, every model scored on **overall**, **warm**,
 
 ```bash
 python scripts/benchmark.py
+python scripts/benchmark.py --mode ab-sasrec
 ```
+
+Cached per-model results live under `artifacts/benchmark_cache/`; pass `--force`
+to retrain everything.
 
 ## Cross-regime Philadelphia
 
 One model, one training set, four views. Cold entities arise naturally under a
 single wall-clock cutoff — not simulated. See `docs/techniques.md`.
 
-- **Dataset:** Dataset(users=2,500, items=4,200, interactions=184,639, density=1.7585%, social_edges=25,525, has_images=False)
+- **Dataset:** Dataset(users=1,507, items=3,401, interactions=20,258, density=0.3953%, social_edges=20,092, has_images=False)
 - **Split:** global-time split at q=0.9
-- **Cold sets:** 223 cold items, 360 cold users
-- **Slice users:** warm=899, cold-item=514, cold-user=346
+- **Cold sets:** 51 cold items, 78 cold users
+- **Slice users:** warm=228, cold-item=63, cold-user=78
 - **Run date:** 2026-07-13
-- **Total run time:** 608s (single-thread BLAS, laptop CPU)
+- **Total run time:** 1435s (single-thread BLAS, laptop CPU)
 
 | model | overall_r@20 | warm_r@20 | cold_item_r@20 | cold_user_r@20 | ndcg@10 | fit+rec (s) |
 |---|---|---|---|---|---|---|
-| popularity | 0.0458 | 0.0437 | 0.0000 | 0.0686 | 0.0392 | 0.6 |
-| als | 0.0171 | 0.0275 | 0.0000 | 0.0000 | 0.0176 | 2.4 |
-| bpr | 0.0168 | 0.0270 | 0.0000 | 0.0000 | 0.0165 | 7.9 |
-| sasrec | 0.0368 | 0.0598 | 0.0000 | 0.0000 | 0.0396 | 307.8 |
-| two_stage | 0.0232 | 0.0395 | 0.0000 | 0.0000 | 0.0255 | 76.0 |
-| two_stage_unified | 0.0525 | 0.0516 | 0.0000 | 0.0867 | 0.0401 | 212.5 |
+| popularity | 0.0607 | 0.0532 | 0.0000 | 0.0899 | 0.0263 | 0.2 |
+| als | 0.0221 | 0.0314 | 0.0000 | 0.0000 | 0.0116 | 0.9 |
+| bpr | 0.0247 | 0.0353 | 0.0000 | 0.0000 | 0.0154 | 1.2 |
+| sasrec | 0.0304 | 0.0423 | 0.0000 | 0.0000 | 0.0120 | 109.0 |
+| item_token_lm | 0.0566 | 0.0476 | 0.0000 | 0.0899 | 0.0245 | 98.2 |
+| two_stage | 0.0315 | 0.0447 | 0.0000 | 0.0000 | 0.0166 | 12.6 |
+| two_stage_llm | 0.0076 | 0.0106 | 0.0000 | 0.0000 | 0.0067 | 880.4 |
+| two_stage_unified | 0.0512 | 0.0525 | 0.0000 | 0.0541 | 0.0255 | 332.8 |
+
+## SASRec ranker feature A/B (unified pipeline)
+
+One model, one training set, four views. Cold entities arise naturally under a
+single wall-clock cutoff — not simulated. See `docs/techniques.md`.
+
+**Comparison:** `two_stage_unified` vs `two_stage_unified_sasrec` — identical `MultiRetriever`, ranker gains `sasrec_score` in the second row.
+
+- **Dataset:** Dataset(users=1,507, items=3,401, interactions=20,258, density=0.3953%, social_edges=20,092, has_images=False)
+- **Split:** global-time split at q=0.9
+- **Cold sets:** 51 cold items, 78 cold users
+- **Slice users:** warm=228, cold-item=63, cold-user=78
+- **Run date:** 2026-07-13
+- **Total run time:** 121s (single-thread BLAS, laptop CPU)
+
+| model | overall_r@20 | warm_r@20 | cold_item_r@20 | cold_user_r@20 | ndcg@10 | fit+rec (s) |
+|---|---|---|---|---|---|---|
+| two_stage_unified | 0.0617 | 0.0591 | 0.0000 | 0.0770 | 0.0250 | 121.4 |
+| two_stage_unified_sasrec | 0.0512 | 0.0525 | 0.0000 | 0.0541 | 0.0255 | 343.3 |
 
 ## How to read this
 
@@ -40,5 +65,8 @@ single wall-clock cutoff — not simulated. See `docs/techniques.md`.
 Collaborative models (als, bpr, sasrec, two_stage) should be strong on warm and
 near-zero on both cold slices. Popularity lifts cold-user. The unified two-stage
 (`MultiRetriever` → ranker) is the architecture meant to stay non-zero across all
-three regimes. Cold-item recall stays low on Yelp because item text is only
-name + categories — see `docs/techniques.md`.
+three regimes. **Generative / language models:** `item_token_lm` autoregressively
+generates item tokens; `two_stage_llm` re-ranks two-tower candidates with a
+cross-encoder (candidate pool=80). Cold-item recall stays
+low on Yelp because item text is only name + categories — see `docs/techniques.md`.
+
