@@ -120,6 +120,7 @@ Details: [`docs/techniques.md`](docs/techniques.md).
 - [x] Generative: item-token LM, LLM cross-encoder reranker
 - [x] Graph: LightGCN (BPR + neighborhood aggregation)
 - [x] Multimodal: CLIP image embeddings (`scripts/build_image_vectors.py`)
+- [x] Tier 3: HSTU, semantic ID LM, contrastive two-tower, MMR diversity, IPS eval
 
 ## Project structure
 
@@ -138,6 +139,11 @@ recsys-lab/
 │   ├── techniques.md         # methods reference + interview concepts
 │   └── benchmarks.md         # latest numbers (auto-generated)
 └── notebooks/
+    ├── 01_setup_and_eda.ipynb
+    ├── 02_baselines.ipynb … 05_social.ipynb
+    ├── 06_tier1_cold_start.ipynb   # Tier 1: review text, extended ranker
+    ├── 07_tier2_graph_multimodal.ipynb  # Tier 2: LightGCN, CLIP images
+    └── 08_tier3_modern.ipynb       # Tier 3: HSTU, semantic IDs, MMR, IPS
 ```
 
 ## License

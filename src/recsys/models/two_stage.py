@@ -28,6 +28,7 @@ from ..config import settings
 from ..eval.split import temporal_split
 from .base import Recommender
 from .graph import LightGCNRecommender
+from .hstu import HSTURecommender
 from .multi_retriever import MultiRetriever
 from .ranker import LightGBMRanker
 from .ranker_features import ExtendedRankerFeatures
@@ -49,6 +50,8 @@ class TwoStageRecommender(Recommender):
         social_kwargs: Optional[dict] = None,
         use_sasrec: bool = False,
         sasrec_kwargs: Optional[dict] = None,
+        use_hstu: bool = False,
+        hstu_kwargs: Optional[dict] = None,
         use_lightgcn: bool = False,
         lightgcn_kwargs: Optional[dict] = None,
         use_extended_features: bool = True,
@@ -86,6 +89,8 @@ class TwoStageRecommender(Recommender):
         self.social_kwargs = social_kwargs or {}
         self.use_sasrec = use_sasrec
         self.sasrec_kwargs = sasrec_kwargs or {}
+        self.use_hstu = use_hstu
+        self.hstu_kwargs = hstu_kwargs or {}
         self.use_lightgcn = use_lightgcn
         self.lightgcn_kwargs = lightgcn_kwargs or {}
         self.use_extended_features = use_extended_features
@@ -93,6 +98,7 @@ class TwoStageRecommender(Recommender):
         self.ranker = LightGBMRanker(verbose=verbose, **self.ranker_kwargs)
         self._social_model: Optional[SocialRecommender] = None
         self._sasrec_model: Optional[SASRecRecommender] = None
+        self._hstu_model: Optional[HSTURecommender] = None
         self._lightgcn_model: Optional[LightGCNRecommender] = None
         self._train: Optional[pd.DataFrame] = None
 
@@ -125,6 +131,9 @@ class TwoStageRecommender(Recommender):
         if self.use_sasrec:
             self._sasrec_model = SASRecRecommender(**self.sasrec_kwargs)
             self._sasrec_model.fit(ret_train)
+        if self.use_hstu:
+            self._hstu_model = HSTURecommender(**self.hstu_kwargs)
+            self._hstu_model.fit(ret_train)
         if self.use_lightgcn:
             self._lightgcn_model = LightGCNRecommender(**self.lightgcn_kwargs)
             self._lightgcn_model.fit(ret_train)
@@ -136,12 +145,15 @@ class TwoStageRecommender(Recommender):
         retrieval_scores = self._score_candidates(label_users, candidates)
         train_social_scores = None
         train_sasrec_scores = None
+        train_hstu_scores = None
         train_extended = None
         train_lightgcn_scores = None
         if self.use_social:
             train_social_scores = self._social_model.score_candidates(candidates)
         if self.use_sasrec:
             train_sasrec_scores = self._sasrec_model.score_candidates(candidates)
+        if self.use_hstu:
+            train_hstu_scores = self._hstu_model.score_candidates(candidates)
         if self.use_lightgcn:
             train_lightgcn_scores = self._lightgcn_model.score_candidates(candidates)
         if self.use_extended_features:
@@ -157,6 +169,7 @@ class TwoStageRecommender(Recommender):
             print(
                 f"  training ranker (use_social={self.use_social}, "
                 f"use_sasrec={self.use_sasrec}, "
+                f"use_hstu={self.use_hstu}, "
                 f"use_lightgcn={self.use_lightgcn}, "
                 f"use_extended={self.use_extended_features})..."
             )
@@ -168,6 +181,7 @@ class TwoStageRecommender(Recommender):
             labels=labels,
             social_scores=train_social_scores,
             sasrec_scores=train_sasrec_scores,
+            hstu_scores=train_hstu_scores,
             lightgcn_scores=train_lightgcn_scores,
             extended_features=train_extended,
         )
@@ -180,6 +194,8 @@ class TwoStageRecommender(Recommender):
             self._social_model.fit(train)
         if self.use_sasrec:
             self._sasrec_model.fit(train)
+        if self.use_hstu:
+            self._hstu_model.fit(train)
         if self.use_lightgcn:
             self._lightgcn_model.fit(train)
         return self
@@ -202,6 +218,9 @@ class TwoStageRecommender(Recommender):
         sasrec_scores = (
             self._sasrec_model.score_candidates(candidates) if self.use_sasrec else None
         )
+        hstu_scores = (
+            self._hstu_model.score_candidates(candidates) if self.use_hstu else None
+        )
         lightgcn_scores = (
             self._lightgcn_model.score_candidates(candidates)
             if self.use_lightgcn
@@ -218,6 +237,7 @@ class TwoStageRecommender(Recommender):
             k=k,
             social_scores=social_scores,
             sasrec_scores=sasrec_scores,
+            hstu_scores=hstu_scores,
             lightgcn_scores=lightgcn_scores,
             extended_features=extended_features,
         )

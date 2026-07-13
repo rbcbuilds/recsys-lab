@@ -290,14 +290,14 @@ Takeaways: two-stage beats retrieval-alone; social adds a further lift as a rank
 | LightGCN | `models/graph.py` | **Done** — BPR training, graph propagation, benchmark + optional ranker feature (`use_lightgcn`) |
 | CLIP / multimodal | `models/multimodal.py`, `scripts/build_image_vectors.py` | **Done** — `ImageEmbeddingRecommender`; auto-included when `item_image_vectors.npy` exists |
 
-### Tier 3 — modern / senior-depth
-| Scaffold | Path | Goal |
+### Tier 3 — modern / senior-depth (implemented)
+| Module | Path | Status |
 |---|---|---|
-| HSTU | `models/hstu.py` | Industrial sequential model; ranker feature like SASRec |
-| Semantic item IDs | `models/semantic_ids.py` | TIGER/LC-Rec compositional tokens for generative rec |
-| Contrastive two-tower | `models/contrastive.py` | Hard negatives / SimGCL-style warm lift |
-| Slate diversity | `eval/slate.py` | MMR / DPP post-rank; relevance–diversity Pareto |
-| Debiased eval | `eval/debias.py` | IPS / SNIPS propensity-weighted metrics |
+| HSTU | `models/hstu.py` | **Done** — time-delta sequential model; benchmark + optional `use_hstu` ranker feature |
+| Semantic item IDs | `models/semantic_ids.py` | **Done** — category + cluster + leaf tokens; causal LM retrieval |
+| Contrastive two-tower | `models/contrastive.py` | **Done** — popularity hard negatives + embedding dropout |
+| Slate diversity | `eval/slate.py` | **Done** — MMR / greedy DPP; `--diversify` in benchmark |
+| Debiased eval | `eval/debias.py` | **Done** — IPS recall; `--ips` in benchmark |
 
 ---
 

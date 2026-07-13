@@ -1,5 +1,6 @@
 """Evaluation: temporal split + ranking metrics."""
 
+from .debias import evaluate_ips, item_propensity
 from .metrics import (
     coverage,
     evaluate,
@@ -9,6 +10,7 @@ from .metrics import (
     ndcg_at_k,
     recall_at_k,
 )
+from .slate import diversify_slate
 from .split import (
     cold_item_holdout,
     cold_user_holdout,
@@ -28,4 +30,7 @@ __all__ = [
     "ndcg_at_k",
     "hit_rate_at_k",
     "coverage",
+    "diversify_slate",
+    "item_propensity",
+    "evaluate_ips",
 ]

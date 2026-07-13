@@ -1,29 +1,7 @@
-"""Debiased / causal-style evaluation  [SCAFFOLD — Tier 3].
+"""Debiased / causal-style evaluation (IPS / SNIPS).
 
-Average Recall@K on logged data confounds **model quality** with **exposure
-bias** (popular items are seen more → easier to hit in test). Senior interviews
-ask how you'd report metrics honestly.
-
-Techniques to scaffold:
-
-| Method | Idea | When to use |
-|---|---|---|
-| **IPS** | Weight each test event by 1 / P(expose item) | Known logging policy |
-| **SNIPS** | Self-normalized IPS (more stable) | Same, small samples |
-| **Stratified slices** | Report warm / cold / activity buckets separately | Always (you do this) |
-| **Counterfactual ranking** | Train on propensity-scored pairs | Research / offline eval |
-
-This repo's cross-regime slices are already a form of stratified analysis.
-Extend with propensity weights from item popularity::
-
-    P(expose i) ∝ pop(i)^alpha
-
-and report IPS-weighted recall alongside raw recall.
-
-Interview point: "Popularity wins cold-user partly because it's the exposure
-baseline — here's IPS-weighted lift for the unified model."
-
-References: Schnabel et al. (IPS for recsys), 2016; Yang et al. (unbiased LTR).
+Down-weights easy popular hits so offline metrics are less confounded by
+exposure bias.
 """
 
 from __future__ import annotations
@@ -32,16 +10,23 @@ from typing import Dict, Optional
 
 import pandas as pd
 
+from ..config import settings
+from .metrics import recall_at_k
+
 
 def item_propensity(
     train: pd.DataFrame,
     smoothing: float = 1.0,
 ) -> Dict[str, float]:
     """Estimate P(item appears in a random user's history) from train counts."""
-    raise NotImplementedError(
-        "Compute normalized item counts from train; use as IPS denominators. "
-        "See this module's docstring."
-    )
+    i = settings.item_col
+    counts = train.groupby(i).size()
+    n_items = len(counts)
+    total = float(counts.sum()) + smoothing * n_items
+    prop: Dict[str, float] = {}
+    for iid, c in counts.items():
+        prop[str(iid)] = (float(c) + smoothing) / total
+    return prop
 
 
 def evaluate_ips(
@@ -50,6 +35,68 @@ def evaluate_ips(
     propensity: Dict[str, float],
     k: int = 10,
     clip_max: float = 100.0,
+    snips: bool = False,
 ) -> Dict[str, float]:
-    """IPS-weighted recall@K (and optionally SNIPS variant)."""
-    raise NotImplementedError
+    """IPS-weighted recall@K; set ``snips=True`` for self-normalized weights."""
+    num = 0.0
+    den = 0.0
+    per_user_num: list[float] = []
+    per_user_den: list[float] = []
+
+    for user_id, truth in ground_truth.items():
+        if not truth:
+            continue
+        recs = recommendations.get(user_id, [])[:k]
+        u_num, u_den = 0.0, 0.0
+        for item in truth:
+            p = max(propensity.get(str(item), 1e-6), 1e-6)
+            w = min(1.0 / p, clip_max)
+            u_den += w
+            if str(item) in recs:
+                u_num += w
+        if u_den > 0:
+            per_user_num.append(u_num)
+            per_user_den.append(u_den)
+            num += u_num
+            den += u_den
+
+    if snips and per_user_den:
+        snips_val = float(
+            sum(n / d for n, d in zip(per_user_num, per_user_den) if d > 0)
+            / len(per_user_den)
+        )
+    else:
+        snips_val = 0.0
+
+    ips = num / den if den > 0 else 0.0
+
+    raw = 0.0
+    n_users = 0
+    for user_id, truth in ground_truth.items():
+        if not truth:
+            continue
+        raw += recall_at_k(recommendations.get(user_id, []), truth, k)
+        n_users += 1
+    raw /= n_users if n_users else 1.0
+
+    out = {
+        f"ips_recall@{k}": ips,
+        f"raw_recall@{k}": raw,
+    }
+    if snips:
+        out[f"snips_recall@{k}"] = snips_val
+    return out
+
+
+def evaluate_ips_slices(
+    recommendations: Dict[str, list],
+    ground_truth_slices: Dict[str, Dict[str, set]],
+    propensity: Dict[str, float],
+    k: int = 10,
+    clip_max: float = 100.0,
+) -> Dict[str, Dict[str, float]]:
+    """IPS metrics per named slice (e.g. warm / cold-user)."""
+    return {
+        name: evaluate_ips(recommendations, ground_truth, propensity, k, clip_max)
+        for name, ground_truth in ground_truth_slices.items()
+    }

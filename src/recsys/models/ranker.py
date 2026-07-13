@@ -68,6 +68,7 @@ class LightGBMRanker(Recommender):
         self._model = None
         self._use_social = False  # set at fit time if social_scores provided
         self._use_sasrec = False  # set at fit time if sasrec_scores provided
+        self._use_hstu = False
         self._use_lightgcn = False
         self._use_extended = False
         self._user_stats: Dict[str, Dict[str, float]] = {}
@@ -82,6 +83,8 @@ class LightGBMRanker(Recommender):
             names.append("social_score")
         if self._use_sasrec:
             names.append("sasrec_score")
+        if self._use_hstu:
+            names.append("hstu_score")
         if self._use_lightgcn:
             names.append("lightgcn_score")
         if self._use_extended:
@@ -97,6 +100,7 @@ class LightGBMRanker(Recommender):
         labels: Optional[Dict[str, Dict[str, float]]] = None,
         social_scores: Optional[Dict[str, Dict[str, float]]] = None,
         sasrec_scores: Optional[Dict[str, Dict[str, float]]] = None,
+        hstu_scores: Optional[Dict[str, Dict[str, float]]] = None,
         lightgcn_scores: Optional[Dict[str, Dict[str, float]]] = None,
         extended_features: Optional[Dict[str, Dict[str, Dict[str, float]]]] = None,
     ) -> "LightGBMRanker":
@@ -110,10 +114,12 @@ class LightGBMRanker(Recommender):
         retrieval_scores = retrieval_scores or {}
         self._use_social = social_scores is not None
         self._use_sasrec = sasrec_scores is not None
+        self._use_hstu = hstu_scores is not None
         self._use_lightgcn = lightgcn_scores is not None
         self._use_extended = extended_features is not None
         social_scores = social_scores or {}
         sasrec_scores = sasrec_scores or {}
+        hstu_scores = hstu_scores or {}
         lightgcn_scores = lightgcn_scores or {}
         extended_features = extended_features or {}
 
@@ -128,6 +134,7 @@ class LightGBMRanker(Recommender):
             scores = retrieval_scores.get(user_id, {})
             soc = social_scores.get(user_id, {})
             sas = sasrec_scores.get(user_id, {})
+            hst = hstu_scores.get(user_id, {})
             lgc = lightgcn_scores.get(user_id, {})
             ext = extended_features.get(user_id, {})
             if not any(rel.get(it, 0) > 0 for it in items):
@@ -138,6 +145,7 @@ class LightGBMRanker(Recommender):
                         user_id, item_id, scores.get(item_id, 0.0), rank,
                         social_score=soc.get(item_id, 0.0),
                         sasrec_score=sas.get(item_id, 0.0),
+                        hstu_score=hst.get(item_id, 0.0),
                         lightgcn_score=lgc.get(item_id, 0.0),
                         extended=ext.get(str(item_id), {}),
                     )
@@ -188,6 +196,7 @@ class LightGBMRanker(Recommender):
         k: int = 10,
         social_scores: Optional[Dict[str, Dict[str, float]]] = None,
         sasrec_scores: Optional[Dict[str, Dict[str, float]]] = None,
+        hstu_scores: Optional[Dict[str, Dict[str, float]]] = None,
         lightgcn_scores: Optional[Dict[str, Dict[str, float]]] = None,
         extended_features: Optional[Dict[str, Dict[str, Dict[str, float]]]] = None,
     ) -> Dict[str, List[str]]:
@@ -197,6 +206,7 @@ class LightGBMRanker(Recommender):
         retrieval_scores = retrieval_scores or {}
         social_scores = social_scores or {}
         sasrec_scores = sasrec_scores or {}
+        hstu_scores = hstu_scores or {}
         lightgcn_scores = lightgcn_scores or {}
         extended_features = extended_features or {}
         out: Dict[str, List[str]] = {}
@@ -207,6 +217,7 @@ class LightGBMRanker(Recommender):
             scores = retrieval_scores.get(user_id, {})
             soc = social_scores.get(user_id, {})
             sas = sasrec_scores.get(user_id, {})
+            hst = hstu_scores.get(user_id, {})
             lgc = lightgcn_scores.get(user_id, {})
             ext = extended_features.get(user_id, {})
             X = np.asarray(
@@ -215,6 +226,7 @@ class LightGBMRanker(Recommender):
                         user_id, item_id, scores.get(item_id, 0.0), rank,
                         social_score=soc.get(item_id, 0.0),
                         sasrec_score=sas.get(item_id, 0.0),
+                        hstu_score=hst.get(item_id, 0.0),
                         lightgcn_score=lgc.get(item_id, 0.0),
                         extended=ext.get(str(item_id), {}),
                     )
@@ -308,6 +320,7 @@ class LightGBMRanker(Recommender):
         rank: int,
         social_score: float = 0.0,
         sasrec_score: float = 0.0,
+        hstu_score: float = 0.0,
         lightgcn_score: float = 0.0,
         extended: Optional[Dict[str, float]] = None,
     ) -> List[float]:
@@ -326,6 +339,8 @@ class LightGBMRanker(Recommender):
             row.append(float(social_score))
         if self._use_sasrec:
             row.append(float(sasrec_score))
+        if self._use_hstu:
+            row.append(float(hstu_score))
         if self._use_lightgcn:
             row.append(float(lightgcn_score))
         if self._use_extended:

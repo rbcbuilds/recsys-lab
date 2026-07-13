@@ -44,16 +44,19 @@ import pandas as pd
 
 from src.recsys.config import settings
 from src.recsys.data import load_dataset
-from src.recsys.eval import evaluate, global_temporal_split
+from src.recsys.eval import evaluate, evaluate_ips, global_temporal_split, item_propensity
 from src.recsys.eval.cache import (
     load_model_cache,
     run_cache_dir,
     save_model_cache,
 )
+from src.recsys.eval.slate import diversify_slate
 from src.recsys.models import (
     ALSRecommender,
     BPRRecommender,
     ContentBasedRecommender,
+    ContrastiveTwoTowerRecommender,
+    HSTURecommender,
     ImageEmbeddingRecommender,
     ItemTokenLMRecommender,
     LightGCNRecommender,
@@ -61,10 +64,12 @@ from src.recsys.models import (
     MultiRetriever,
     PopularityRecommender,
     SASRecRecommender,
+    SemanticIDRecommender,
     SocialRecommender,
     TwoStageRecommender,
     TwoTowerRecommender,
 )
+from src.recsys.models.text_embeddings import encode_item_text
 
 REPORT_PATH = Path(__file__).resolve().parents[1] / "docs" / "benchmarks.md"
 
@@ -79,6 +84,9 @@ UNIFIED_KWARGS = dict(
     sasrec_kwargs=SASREC_KWARGS,
 )
 LIGHTGCN_KWARGS = dict(dim=64, n_layers=2, epochs=10)
+HSTU_KWARGS = dict(dim=64, epochs=12, max_len=50)
+SEMANTIC_ID_KWARGS = dict(dim=64, epochs=10, n_clusters=32)
+CONTRASTIVE_TT_KWARGS = dict(dim=64, epochs=10, hard_negative_k=5)
 TWO_TOWER_KWARGS = dict(dim=64, epochs=10)
 
 
@@ -112,6 +120,25 @@ def build_unified_two_stage(ds, use_sasrec: bool = False) -> TwoStageRecommender
     )
 
 
+TIER3_MODELS = (
+    "hstu",
+    "semantic_id_lm",
+    "contrastive_two_tower",
+)
+
+
+def _fit_model(model, train, ds) -> None:
+    if getattr(model, "name", "") == "semantic_id_lm":
+        model.fit(train, items=ds.items)
+    else:
+        model.fit(train)
+
+
+def _item_embedding_dict(ds) -> dict:
+    emb, item_ids, _ = encode_item_text(ds.items)
+    return {iid: emb[row] for row, iid in enumerate(item_ids)}
+
+
 FAST_MODELS = (
     "popularity",
     "als",
@@ -139,6 +166,9 @@ def model_configs_for_mode(mode: str) -> dict:
         "bpr": {"factors": 64, "iterations": 80},
         "sasrec": SASREC_KWARGS,
         "lightgcn": LIGHTGCN_KWARGS,
+        "hstu": HSTU_KWARGS,
+        "semantic_id_lm": SEMANTIC_ID_KWARGS,
+        "contrastive_two_tower": CONTRASTIVE_TT_KWARGS,
         "item_token_lm": ITEM_TOKEN_LM_KWARGS,
         "two_stage": {"candidate_n": 200, "use_social": False, **TWO_TOWER_KWARGS},
         "two_stage_llm": {
@@ -149,12 +179,22 @@ def model_configs_for_mode(mode: str) -> dict:
     }
     if _has_image_vectors():
         configs["image_embedding"] = {}
+    if mode == "tier3":
+        return {k: configs[k] for k in TIER3_MODELS if k in configs}
     if mode == "fast":
         keys = list(FAST_MODELS)
         if "image_embedding" in configs:
             keys.append("image_embedding")
         return {k: configs[k] for k in keys if k in configs}
     return configs
+
+
+def _tier3_models(ds) -> dict:
+    return {
+        "hstu": HSTURecommender(**HSTU_KWARGS),
+        "semantic_id_lm": SemanticIDRecommender(**SEMANTIC_ID_KWARGS),
+        "contrastive_two_tower": ContrastiveTwoTowerRecommender(**CONTRASTIVE_TT_KWARGS),
+    }
 
 
 def _tier2_models(ds) -> dict:
@@ -192,6 +232,9 @@ def build_models(ds, mode: str = "full"):
         "two_stage_unified": build_unified_two_stage(ds, use_sasrec=False),
     }
     base.update(_tier2_models(ds))
+    base.update(_tier3_models(ds))
+    if mode == "tier3":
+        return {k: base[k] for k in TIER3_MODELS if k in base}
     if mode == "fast":
         keys = list(FAST_MODELS)
         if "image_embedding" in base:
@@ -274,6 +317,9 @@ def run_benchmark(
     use_cache: bool = True,
     force: bool = False,
     only: set[str] | None = None,
+    diversify: bool = False,
+    diversify_lambda: float = 0.7,
+    report_ips: bool = False,
 ):
     train, test_pos, cold_items, cold_users = build_slices(ds, cutoff_quantile)
     warm_gt, ci_gt, cu_gt = slice_ground_truth(test_pos, cold_items, cold_users)
@@ -293,6 +339,8 @@ def run_benchmark(
         k=k,
     )
     configs = model_configs_for_mode(mode)
+    propensity = item_propensity(train) if report_ips else None
+    item_emb = _item_embedding_dict(ds) if diversify else None
 
     print(f"split: {split_desc}", flush=True)
     print(
@@ -325,10 +373,17 @@ def run_benchmark(
             tag = "cached"
         else:
             t = time.time()
-            model.fit(train)
-            recs = model.recommend(users, k=k)
+            _fit_model(model, train, ds)
+            recs = model.recommend(users, k=k * 5 if diversify else k)
+            if diversify and item_emb:
+                recs = diversify_slate(
+                    recs, item_emb, k=k, method="mmr", lambda_=diversify_lambda
+                )
             dt = time.time() - t
             metrics = _score_recs(recs, test_pos, warm_gt, ci_gt, cu_gt, k)
+            if report_ips and propensity:
+                ips = evaluate_ips(recs, test_pos, propensity, k=k)
+                metrics[f"ips_recall@{k}"] = ips[f"ips_recall@{k}"]
             if use_cache:
                 save_model_cache(
                     cache_dir,
@@ -357,7 +412,13 @@ def run_benchmark(
             f"{name:28s} overall={row[f'overall_r@{k}']:.4f} "
             f"warm={row[f'warm_r@{k}']:.4f} "
             f"cold_item={row[f'cold_item_r@{k}']:.4f} "
-            f"cold_user={row[f'cold_user_r@{k}']:.4f} ({tag})",
+            f"cold_user={row[f'cold_user_r@{k}']:.4f} "
+            + (
+                f"ips={row.get(f'ips_recall@{k}', 0.0):.4f} "
+                if report_ips and f"ips_recall@{k}" in row
+                else ""
+            )
+            + f"({tag})",
             flush=True,
         )
 
@@ -397,7 +458,10 @@ cold-item when `item_image_vectors.npy` is present. The unified two-stage
 (`MultiRetriever` → ranker) is the architecture meant to stay non-zero across all
 three regimes. **Generative / language models:** `item_token_lm` autoregressively
 generates item tokens; `two_stage_llm` re-ranks two-tower candidates with a
-cross-encoder (candidate pool=80). Cold-item recall stays
+cross-encoder (candidate pool=80). **Tier 3:** `hstu` adds time-aware sequential
+signal; `semantic_id_lm` uses compositional item codes; `contrastive_two_tower`
+trains with popularity hard negatives. Pass ``--diversify`` for MMR post-ranking
+and ``--ips`` for propensity-weighted recall. Cold-item recall stays
 low on Yelp because item text is only name + categories — see `docs/techniques.md`.
 """
 
@@ -472,11 +536,10 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
         "--mode",
-        choices=["full", "fast", "ab-sasrec"],
+        choices=["full", "fast", "tier3", "ab-sasrec"],
         default="full",
-        help="full = all models (+ image_embedding when vectors exist); "
-        "fast = 7 core models (skip LLM + item_token_lm); "
-        "ab-sasrec = unified with/without SASRec ranker feature.",
+        help="full = all models; fast = 7 core models; tier3 = hstu + semantic_id_lm "
+        "+ contrastive_two_tower; ab-sasrec = unified with/without SASRec ranker feature.",
     )
     ap.add_argument("--cutoff-quantile", type=float, default=0.9)
     ap.add_argument("--k", type=int, default=max(settings.eval_ks))
@@ -487,6 +550,22 @@ def main() -> None:
         "--only",
         default=None,
         help="Comma-separated model keys to run (others skipped).",
+    )
+    ap.add_argument(
+        "--diversify",
+        action="store_true",
+        help="Apply MMR slate diversification before scoring.",
+    )
+    ap.add_argument(
+        "--diversify-lambda",
+        type=float,
+        default=0.7,
+        help="MMR relevance/diversity tradeoff (1.0 = pure relevance).",
+    )
+    ap.add_argument(
+        "--ips",
+        action="store_true",
+        help="Also report IPS-weighted recall@K.",
     )
     args = ap.parse_args()
 
@@ -504,6 +583,9 @@ def main() -> None:
         use_cache=not args.no_cache,
         force=args.force,
         only=only,
+        diversify=args.diversify,
+        diversify_lambda=args.diversify_lambda,
+        report_ips=args.ips,
     )
 
     print(f"\n=== CROSS-REGIME BENCHMARK (recall@{args.k}, mode={args.mode}) ===")

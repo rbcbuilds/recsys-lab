@@ -17,13 +17,13 @@ Working now:
     LLMReranker / LLMTwoStage     - language-model scoring re-ranks retrieved candidates
     LightGCNRecommender           - interaction-graph propagation (BPR + LightGCN)
     ImageEmbeddingRecommender     - CLIP image embeddings for cold-item retrieval
+    HSTURecommender               - time-aware sequential model (Tier 3)
+    SemanticIDRecommender         - compositional semantic item tokens (Tier 3)
+    ContrastiveTwoTowerRecommender - hard-negative two-tower training (Tier 3)
 
-Scaffolds (Tier 3 — documented interfaces, raise NotImplementedError):
-    hstu.HSTURecommender                   - industrial sequential model (Tier 3)
-    semantic_ids.SemanticIDRecommender     - TIGER-style semantic item tokens (Tier 3)
-    contrastive.ContrastiveTwoTowerRecommender - hard-negative two-tower (Tier 3)
-    eval.slate.diversify_slate             - MMR / DPP post-ranking diversity (Tier 3)
-    eval.debias.evaluate_ips               - propensity-weighted metrics (Tier 3)
+Tier 3 eval utilities (``recsys.eval``):
+    slate.diversify_slate         - MMR / DPP post-ranking diversity
+    debias.evaluate_ips           - IPS-weighted offline metrics
 """
 
 from .base import Recommender
